@@ -34,11 +34,15 @@ import org.joml.Vector4f;
 import org.lwjgl.system.MemoryUtil;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
 
-/** Through-walls ESP using a custom no-depth-test pipeline (follows Fabric's 1.21.11 rendering docs). */
+/**
+ * Through-walls ESP using a custom no-depth-test pipeline (follows Fabric's 1.21.11 rendering docs).
+ * Tracers are drawn as thin camera-facing ribbons through the same pipeline, so no second pipeline is needed.
+ */
 public final class EspRenderer {
     private static final RenderPipeline PIPELINE = RenderPipelines.register(
             RenderPipeline.builder(RenderPipelines.DEBUG_FILLED_SNIPPET)
@@ -52,10 +56,12 @@ public final class EspRenderer {
     private static final Matrix4f TEXTURE_MATRIX = new Matrix4f();
     private static MappableRingBuffer vertexBuffer;
 
-    private static final int MAX_BOXES = 900;
+    private static final int MAX_BOXES = 900, MAX_TRACERS = 80, BLOCK_TRACERS = 16;
 
     private record Box(double x1, double y1, double z1, double x2, double y2, double z2,
                        float r, float g, float b, float fillA, float edgeA, boolean frame) {}
+
+    private record Tracer(double x, double y, double z, float r, float g, float b) {}
 
     private EspRenderer() {}
 
@@ -65,17 +71,18 @@ public final class EspRenderer {
     }
 
     // ---- extraction: decide what to draw ----
-    private static List<Box> collect() {
-        List<Box> out = new ArrayList<>();
+    private static void collect(List<Box> out, List<Tracer> tr) {
         Minecraft mc = Minecraft.getInstance();
-        if (mc.level == null || mc.player == null) return out;
+        if (mc.level == null || mc.player == null) return;
         ModuleManager m = SirenClient.modules;
         double px = mc.player.getX(), py = mc.player.getY(), pz = mc.player.getZ();
         double max2 = (double) Config.espDist * Config.espDist;
         float fill = Config.espAlpha / 100f * 0.35f;
 
-        if (m.base.isEnabled()) for (Hit h : m.base.values()) addHit(out, h, 0x2EFF8A, fill, px, pz, max2);
-        if (m.sus.isEnabled()) for (Hit h : m.sus.values()) addHit(out, h, 0xFF8C1A, fill, px, pz, max2);
+        if (m.base.isEnabled())
+            for (Hit h : m.base.values()) addHit(out, tr, h, Config.COLORS[Config.baseColorIdx], fill, px, pz, max2);
+        if (m.sus.isEnabled())
+            for (Hit h : m.sus.values()) addHit(out, tr, h, Config.COLORS[Config.susColorIdx], fill, px, pz, max2);
 
         if (m.newChunks.isEnabled()) {
             double y = py - 1.5;
@@ -91,13 +98,22 @@ public final class EspRenderer {
         }
 
         if (m.blockEsp.isEnabled()) {
+            List<double[]> near = new ArrayList<>();
             for (BlockEsp.Found f : m.blockEsp.values()) {
                 for (int i = 0; i < f.size() && out.size() < MAX_BOXES; i++) {
                     int x = f.xyz()[i * 3], y = f.xyz()[i * 3 + 1], z = f.xyz()[i * 3 + 2];
                     double dx = x + 0.5 - px, dz = z + 0.5 - pz;
-                    if (dx * dx + dz * dz > max2) continue;
+                    double d2 = dx * dx + dz * dz;
+                    if (d2 > max2) continue;
                     out.add(box(x, y, z, x + 1, y + 1, z + 1, f.rgb()[i], fill, 0.95f, true));
+                    if (Config.tracers) near.add(new double[]{d2, x + 0.5, y + 0.5, z + 0.5, f.rgb()[i]});
                 }
+            }
+            // Tracers only for the closest few blocks, otherwise they turn into a hairball.
+            near.sort(Comparator.comparingDouble(a -> a[0]));
+            for (int i = 0; i < Math.min(BLOCK_TRACERS, near.size()); i++) {
+                double[] a = near.get(i);
+                tracer(tr, a[1], a[2], a[3], (int) a[4]);
             }
         }
 
@@ -110,18 +126,25 @@ public final class EspRenderer {
                 if (dx * dx + dz * dz > max2) continue;
                 double hw = p.getBbWidth() / 2.0;
                 out.add(box(x - hw, y, z - hw, x + hw, y + p.getBbHeight(), z + hw, 0xFF3B3B, fill + 0.1f, 1f, true));
+                tracer(tr, x, y + p.getBbHeight() / 2.0, z, 0xFF3B3B);
             }
         }
 
         // Waypoints are always drawn, at any distance.
+        int wpTracers = 0;
         for (Config.Waypoint w : Config.waypoints) {
             out.add(box(w.x(), w.y(), w.z(), w.x() + 1, w.y() + 1, w.z() + 1, 0x3BE8FF, fill + 0.15f, 1f, true));
             out.add(box(w.x() + 0.4, w.y() + 1, w.z() + 0.4, w.x() + 0.6, w.y() + 64, w.z() + 0.6, 0x3BE8FF, fill, 0f, false));
+            if (wpTracers++ < 8) tracer(tr, w.x() + 0.5, w.y() + 0.5, w.z() + 0.5, 0x3BE8FF);
         }
-        return out;
     }
 
-    private static void addHit(List<Box> out, Hit h, int rgb, float fill, double px, double pz, double max2) {
+    private static void tracer(List<Tracer> tr, double x, double y, double z, int rgb) {
+        if (!Config.tracers || tr.size() >= MAX_TRACERS) return;
+        tr.add(new Tracer(x, y, z, ((rgb >> 16) & 255) / 255f, ((rgb >> 8) & 255) / 255f, (rgb & 255) / 255f));
+    }
+
+    private static void addHit(List<Box> out, List<Tracer> tr, Hit h, int rgb, float fill, double px, double pz, double max2) {
         if (out.size() >= MAX_BOXES - 3) return;
         double dx = h.x() + 0.5 - px, dz = h.z() + 0.5 - pz;
         if (dx * dx + dz * dz > max2) return;
@@ -132,6 +155,7 @@ public final class EspRenderer {
             int ox = (h.x() >> 4) << 4, oz = (h.z() >> 4) << 4;
             out.add(box(ox, h.y(), oz, ox + 16, h.y() + 0.1, oz + 16, rgb, fill * 0.7f, 0.6f, true));
         }
+        tracer(tr, h.x() + 0.5, h.y() + 0.5, h.z() + 0.5, rgb);
     }
 
     private static Box box(double x1, double y1, double z1, double x2, double y2, double z2,
@@ -145,8 +169,13 @@ public final class EspRenderer {
         ModuleManager m = SirenClient.modules;
         if (m == null || !(m.base.isEnabled() || m.sus.isEnabled() || m.newChunks.isEnabled() || m.blockEsp.isEnabled()
                 || m.playerEsp.isEnabled() || !Config.waypoints.isEmpty())) return;
-        List<Box> boxes = collect();
-        if (boxes.isEmpty()) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null) return;
+
+        List<Box> boxes = new ArrayList<>();
+        List<Tracer> tracers = new ArrayList<>();
+        collect(boxes, tracers);
+        if (boxes.isEmpty() && tracers.isEmpty()) return;
 
         PoseStack matrices = context.matrices();
         Vec3 camera = context.worldState().cameraRenderState.pos;
@@ -160,11 +189,54 @@ public final class EspRenderer {
                 filled(pose, buffer, b.x1(), b.y1(), b.z1(), b.x2(), b.y2(), b.z2(), b.r(), b.g(), b.b(), b.fillA());
             if (b.frame()) frame(pose, buffer, b);
         }
+        if (!tracers.isEmpty()) {
+            float pt = mc.getDeltaTracker().getGameTimeDeltaPartialTick(true);
+            Vec3 look = mc.player.getViewVector(pt);
+            double sx = camera.x + look.x * 1.2, sy = camera.y + look.y * 1.2, sz = camera.z + look.z * 1.2;
+            for (Tracer t : tracers) ribbon(pose, buffer, sx, sy, sz, t, camera);
+        }
         matrices.popPose();
 
         MeshData built = buffer.build();
         if (built == null) return;
-        drawBuilt(Minecraft.getInstance(), built);
+        drawBuilt(mc, built);
+    }
+
+    /** A thin line from the crosshair to a target: two crossed quads so it is visible from any angle. */
+    private static void ribbon(Matrix4fc m, BufferBuilder buf, double sx, double sy, double sz, Tracer t, Vec3 cam) {
+        double dx = t.x() - sx, dy = t.y() - sy, dz = t.z() - sz;
+        double len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (len < 0.5) return;
+        dx /= len; dy /= len; dz /= len;
+        // p = normalize(d x up)
+        double px = -dz, pz = dx, pl = Math.sqrt(px * px + pz * pz);
+        if (pl < 1e-4) { px = 1; pz = 0; pl = 1; }
+        px /= pl; pz /= pl;
+        // q = d x p
+        double qx = dy * pz, qy = dz * px - dx * pz, qz = -dy * px;
+        double ql = Math.sqrt(qx * qx + qy * qy + qz * qz);
+        qx /= ql; qy /= ql; qz /= ql;
+        // Width scales with distance from the camera so the line stays about 2px wide on screen.
+        double camD = Math.sqrt(Math.pow(t.x() - cam.x, 2) + Math.pow(t.y() - cam.y, 2) + Math.pow(t.z() - cam.z, 2));
+        double w0 = 0.0018, w1 = Math.max(0.003, 0.0015 * camD);
+        float r = t.r(), g = t.g(), b = t.b(), a = 0.9f;
+        quad2(m, buf,
+                new double[]{sx - px * w0, sy, sz - pz * w0}, new double[]{sx + px * w0, sy, sz + pz * w0},
+                new double[]{t.x() + px * w1, t.y(), t.z() + pz * w1}, new double[]{t.x() - px * w1, t.y(), t.z() - pz * w1}, r, g, b, a);
+        quad2(m, buf,
+                new double[]{sx - qx * w0, sy - qy * w0, sz - qz * w0}, new double[]{sx + qx * w0, sy + qy * w0, sz + qz * w0},
+                new double[]{t.x() + qx * w1, t.y() + qy * w1, t.z() + qz * w1}, new double[]{t.x() - qx * w1, t.y() - qy * w1, t.z() - qz * w1}, r, g, b, a);
+    }
+
+    /** Emits a quad twice with opposite winding so face culling can never hide it. */
+    private static void quad2(Matrix4fc m, BufferBuilder buf, double[] a, double[] b, double[] c, double[] d,
+                              float r, float g, float bl, float al) {
+        vtx(m, buf, a, r, g, bl, al); vtx(m, buf, b, r, g, bl, al); vtx(m, buf, c, r, g, bl, al); vtx(m, buf, d, r, g, bl, al);
+        vtx(m, buf, d, r, g, bl, al); vtx(m, buf, c, r, g, bl, al); vtx(m, buf, b, r, g, bl, al); vtx(m, buf, a, r, g, bl, al);
+    }
+
+    private static void vtx(Matrix4fc m, BufferBuilder buf, double[] p, float r, float g, float b, float a) {
+        buf.addVertex(m, (float) p[0], (float) p[1], (float) p[2]).setColor(r, g, b, a);
     }
 
     private static void frame(Matrix4fc p, BufferBuilder buf, Box b) {

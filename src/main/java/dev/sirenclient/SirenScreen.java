@@ -27,7 +27,7 @@ public class SirenScreen extends Screen {
     private static final String[] TABS = {"Modules", "Blocks", "Results", "Waypoints", "Scan", "Visuals", "Test"};
     private static final String[] LISTS = {"base", "sus", "esp"};
 
-    private static int tab = 0, page = 0, weight = 2, colorIdx = 0;
+    private static int tab = 0, page = 0, weight = 2, colorIdx = 0, schemCount = 3;
     private static String list = "base", pending = "", status = "";
     private static boolean refocus = false;
 
@@ -295,6 +295,7 @@ public class SirenScreen extends Screen {
         y += 28;
         labels.add(new Label("Tracers: all base/sus hits, nearest 16 BlockESP blocks, players, waypoints.", cx, y, GRAY));
     }
+
     // ---------- tab: test ----------
     private void testTab() {
         int y = cy;
@@ -307,20 +308,32 @@ public class SirenScreen extends Screen {
         });
         btn("Spawn bases", cx + 100, y, 112, () -> { status = TestBases.spawn(); rebuildWidgets(); });
         btn("Get elytra", cx + 216, y, 100, () -> { status = TestBases.gear(); rebuildWidgets(); });
-        y += 30;
-        labels.add(new Label("Singleplayer only. Builds test bases around where you stand:", cx, y, GRAY));
-        y += 14;
-        for (String s : TestBases.info) { labels.add(new Label(s, cx, y, WHITE)); y += 11; }
-        y += 8;
+        y += 24;
+        TestBases.folder(); // makes sure siren-schematics/ exists
+        btn("Load random", cx, y, 110, () -> { status = TestBases.loadSchematics(schemCount); rebuildWidgets(); });
+        btn("How many: " + schemCount, cx + 116, y, 96, () -> { schemCount = schemCount % 8 + 1; rebuildWidgets(); });
+        labels.add(new Label("buried underground", cx + 218, y + 6, GRAY));
+        y += 28;
+        labels.add(new Label("Singleplayer only. Placed bases:", cx, y, GRAY));
+        y += 12;
+        List<String> lines = new ArrayList<>(TestBases.info);
+        lines.addAll(TestBases.schemInfo);
+        int shown = 0;
+        for (String s : lines) {
+            if (shown++ >= 8) { labels.add(new Label("...", cx, y, GRAY)); y += 11; break; }
+            labels.add(new Label(s, cx, y, WHITE));
+            y += 11;
+        }
+        y += 6;
         for (String s : new String[]{
-                "Expect: 2 BaseFinder hits (surface houses) and 1 SusChunks hit",
-                "(buried room). The decoy has a bell, so SusChunks should skip it.",
-                "Fly toward the coordinates; hits appear as chunks load."}) {
+                "Built-in: 2 houses (BaseFinder) + buried room (SusChunks);",
+                "the bell decoy should be skipped. Fly to the coordinates."}) {
             labels.add(new Label(s, cx, y, GRAY));
             y += 11;
         }
         if (!status.isEmpty()) labels.add(new Label(status, cx, y0 + H - 30, ACCENT));
     }
+
     // ---------- widgets ----------
     private void slider(int y, String label, int min, int max, int step, int cur, IntConsumer setter) {
         addRenderableWidget(new Slider(cx, y, 316, label, min, max, step, cur, setter));

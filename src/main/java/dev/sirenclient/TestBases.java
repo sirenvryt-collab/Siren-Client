@@ -17,6 +17,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.Container;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -26,6 +27,7 @@ import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.SpawnerBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -65,6 +67,10 @@ public final class TestBases {
     private record Box(int minCx, int minCz, int maxCx, int maxCz) {}
     private static final List<Box> hidden = new CopyOnWriteArrayList<>();
     private static boolean minedDown = false;
+    /** Recommended "dig down here" spots {x, z}, one per hidden site. They vanish when the hidden sites are revealed. */
+    private static final List<int[]> digSpots = new CopyOnWriteArrayList<>();
+    /** Menu toggle: draw the beacon lines over the dig spots. */
+    public static boolean showDigBeacons = true;
     private static Object armedLevel = null;
 
     private static final int BLOCKS_PER_TICK = 6_000;
@@ -85,6 +91,7 @@ public final class TestBases {
     public static boolean isLarp() { return larp; }
     public static int hiddenCount() { return hidden.size(); }
     public static boolean isMinedDown() { return minedDown; }
+    public static List<int[]> digSpots() { return showDigBeacons ? digSpots : List.of(); }
 
     public static String setLarp(boolean on) {
         Minecraft mc = Minecraft.getInstance();
@@ -118,6 +125,7 @@ public final class TestBases {
         if (!w.equals(world)) {
             world = w;
             hidden.clear();
+            digSpots.clear();
             info.clear();
             minedDown = false;
             armedLevel = null;
@@ -145,6 +153,7 @@ public final class TestBases {
     private static void checkReveal(Minecraft mc) {
         if (minedDown && mc.level != null && mc.level != armedLevel) {
             hidden.clear();
+            digSpots.clear();
             minedDown = false;
             armedLevel = null;
         }
@@ -161,6 +170,10 @@ public final class TestBases {
 
     private static void hide(int x, int z, int w, int d) {
         hidden.add(new Box(x >> 4, z >> 4, (x + w - 1) >> 4, (z + d - 1) >> 4));
+        // Dig spot: 18-40 blocks from the site in a random direction, so you tunnel over to it from there.
+        double ang = RNG.nextDouble() * Math.PI * 2, dist = 18 + RNG.nextInt(23);
+        digSpots.add(new int[]{(int) Math.floor(x + w / 2.0 + Math.cos(ang) * dist),
+                (int) Math.floor(z + d / 2.0 + Math.sin(ang) * dist)});
     }
 
     private static void log(String s) {
@@ -183,7 +196,21 @@ public final class TestBases {
         return "Placed a base ahead of you.";
     }
 
-    private static void spawnAhead(Minecraft mc, MinecraftServer server) {
+    /** Menu button: drops a cluster of fake spawners near bedrock ahead of you right now. */
+    public static String spawnSpawnersNow() {
+        Minecraft mc = Minecraft.getInstance();
+        MinecraftServer server = mc.getSingleplayerServer();
+        if (server == null) return "Singleplayer only.";
+        if (mc.player == null || mc.level == null || mc.level.dimension() != Level.OVERWORLD)
+            return "Be in the overworld first.";
+        ensureHooks();
+        spawnAhead(mc, server, true);
+        return "Placed spawner cages ahead of you (hidden until you dig down and relog).";
+    }
+
+    private static void spawnAhead(Minecraft mc, MinecraftServer server) { spawnAhead(mc, server, false); }
+
+    private static void spawnAhead(Minecraft mc, MinecraftServer server, boolean forceSpawners) {
         var p = mc.player;
         Vec3 v = p.getDeltaMovement();
         double dx = v.x, dz = v.z;
@@ -200,7 +227,10 @@ public final class TestBases {
         int z = (int) Math.floor(p.getZ() + dz * dist + dx * side);
         ServerLevel level = server.overworld();
 
-        if (RNG.nextDouble() < 0.45) {                       // buried: hidden until mine down + relog
+        double roll = forceSpawners ? 0 : RNG.nextDouble();
+        if (roll < 0.15) {                                   // spawner cages near bedrock: hidden until dig down + relog
+            server.execute(() -> placeSpawners(level, x, z));
+        } else if (roll < 0.55) {                            // buried: hidden until mine down + relog
             List<Path> files = schematicFiles();
             if (!files.isEmpty() && RNG.nextDouble() < 0.6) {
                 queueSchematic(files.get(RNG.nextInt(files.size())), level, x, z);
@@ -237,6 +267,43 @@ public final class TestBases {
         hide(x0, z0, w, d);                                  // hidden before the first block exists
         buried(l, x0, z0, w, d, y0, wall, 4 + RNG.nextInt(7));
         log("Buried:  x " + x0 + " z " + z0 + " y " + y0);
+    }
+
+    // =====================================================================
+    // Fake spawners (donut-smp style cages near bedrock)
+    // =====================================================================
+    private static final EntityType<?>[] SPAWNER_MOBS = {EntityType.ZOMBIE, EntityType.SKELETON, EntityType.SPIDER,
+            EntityType.CAVE_SPIDER, EntityType.ZOMBIE, EntityType.SKELETON};
+
+    /**
+     * 2-4 spawners a few blocks apart, just above the bedrock layer. They show the mob in the cage but never
+     * spawn anything: every non-solid block within spawning range (x/z +-4, y +-1) is filled with deepslate.
+     */
+    private static void placeSpawners(ServerLevel l, int x0, int z0) {
+        int span = 14;
+        hide(x0, z0, span, span);                           // hidden before the first block exists
+        int count = 2 + RNG.nextInt(3);
+        int placed = 0, firstY = 0;
+        for (int i = 0; i < count; i++) {
+            BlockPos pos = new BlockPos(x0 + 4 + RNG.nextInt(span - 8), -59 + RNG.nextInt(6), z0 + 4 + RNG.nextInt(span - 8));
+            seal(l, pos);
+            l.setBlock(pos, Blocks.SPAWNER.defaultBlockState(), 2);
+            if (l.getBlockEntity(pos) instanceof SpawnerBlockEntity be)
+                be.setEntityId(SPAWNER_MOBS[RNG.nextInt(SPAWNER_MOBS.length)], l.getRandom());
+            if (placed++ == 0) firstY = pos.getY();
+        }
+        log("Cages:   x " + x0 + " z " + z0 + " y " + firstY + " (x" + placed + ")");
+    }
+
+    private static void seal(ServerLevel l, BlockPos c) {
+        for (int dx = -4; dx <= 4; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dz = -4; dz <= 4; dz++) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue;
+                    BlockPos p = c.offset(dx, dy, dz);
+                    if (!l.getBlockState(p).isCollisionShapeFullBlock(l, p))
+                        l.setBlock(p, Blocks.DEEPSLATE.defaultBlockState(), 2);
+                }
     }
 
     // =====================================================================

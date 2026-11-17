@@ -386,18 +386,17 @@ public final class TestBases {
         PlayerBlockBreakEvents.AFTER.register(TestBases::onBreak);
     }
 
-    /** After the block you mined breaks, also break the 8 around it. Looking up/down = flat 3x3, otherwise a wall 3x3. */
+    /** After the block you mined breaks, also break the 8 around it. Always a vertical 3x3 wall (like DonutSMP),
+     *  even when you look straight up or down. The wall faces the way you are looking horizontally. */
     private static void onBreak(Level level, Player player, BlockPos pos, BlockState state, BlockEntity be) {
         if (!(level instanceof ServerLevel sl) || !(player instanceof ServerPlayer)) return;
         ItemStack tool = player.getMainHandItem();
         if (!tool.is(Items.NETHERITE_PICKAXE) || !PICK_NAME.equals(tool.getHoverName().getString())) return;
-        boolean flat = Math.abs(player.getXRot()) > 50;
-        Direction.Axis facing = player.getDirection().getAxis();
+        Direction.Axis facing = player.getDirection().getAxis();   // horizontal facing only, ignores pitch
         for (int a = -1; a <= 1; a++)
             for (int b = -1; b <= 1; b++) {
                 if (a == 0 && b == 0) continue;
-                BlockPos p = flat ? pos.offset(a, 0, b)
-                        : facing == Direction.Axis.X ? pos.offset(0, a, b) : pos.offset(a, b, 0);
+                BlockPos p = facing == Direction.Axis.X ? pos.offset(0, a, b) : pos.offset(b, a, 0);
                 BlockState st = sl.getBlockState(p);
                 if (st.isAir() || st.getBlock() instanceof LiquidBlock || st.getDestroySpeed(sl, p) < 0) continue; // skips bedrock
                 if (!player.isCreative()) Block.dropResources(st, sl, p, sl.getBlockEntity(p), player, tool);

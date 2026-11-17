@@ -61,5 +61,6 @@ public class SirenClient implements ClientModInitializer {
         ClientWorldEvents.AFTER_CLIENT_WORLD_CHANGE.register((client, level) -> modules.clearAll());
 
         EspRenderer.init();
+        FakeHud.init();
     }
 }

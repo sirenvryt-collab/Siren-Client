@@ -130,12 +130,23 @@ public final class EspRenderer {
             }
         }
 
+        addDigBeacons(out, tr, py);
+
         // Waypoints are always drawn, at any distance.
         int wpTracers = 0;
         for (Config.Waypoint w : Config.waypoints) {
             out.add(box(w.x(), w.y(), w.z(), w.x() + 1, w.y() + 1, w.z() + 1, 0x3BE8FF, fill + 0.15f, 1f, true));
             out.add(box(w.x() + 0.4, w.y() + 1, w.z() + 0.4, w.x() + 0.6, w.y() + 64, w.z() + 0.6, 0x3BE8FF, fill, 0f, false));
             if (wpTracers++ < 8) tracer(tr, w.x() + 0.5, w.y() + 0.5, w.z() + 0.5, 0x3BE8FF);
+        }
+    }
+
+    /** Dig-down beacons: a tall column over each recommended dig spot, with tracers to the first few. */
+    private static void addDigBeacons(List<Box> out, List<Tracer> tr, double py) {
+        int n = 0;
+        for (int[] d : TestBases.digSpots()) {
+            out.add(box(d[0], -64, d[1], d[0] + 1, 320, d[1] + 1, 0xFFE23B, 0.5f, 1f, true));
+            if (n++ < 4) tracer(tr, d[0] + 0.5, py, d[1] + 0.5, 0xFFE23B);
         }
     }
 
@@ -168,7 +179,7 @@ public final class EspRenderer {
     private static void onRender(WorldRenderContext context) {
         ModuleManager m = SirenClient.modules;
         if (m == null || !(m.base.isEnabled() || m.sus.isEnabled() || m.newChunks.isEnabled() || m.blockEsp.isEnabled()
-                || m.playerEsp.isEnabled() || !Config.waypoints.isEmpty())) return;
+                || m.playerEsp.isEnabled() || !Config.waypoints.isEmpty() || !TestBases.digSpots().isEmpty())) return;
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null) return;
 

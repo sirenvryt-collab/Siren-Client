@@ -15,8 +15,9 @@ import java.util.Map;
 public class Config {
     /** "base"/"sus": block -> weight.  "esp": block -> RGB color. */
     public static final Map<String, Map<Block, Integer>> lists = new LinkedHashMap<>();
-    public static int minBase = 12, minSus = 30, espAlpha = 60, espDist = 192;
-    public static boolean beams = true, plates = true, notify = true;
+    public static int minBase = 12, minSus = 40, espAlpha = 60, espDist = 192;
+    public static int susDensity = 15, susDepth = 8, baseColorIdx = 3, susColorIdx = 1;
+    public static boolean beams = true, plates = true, notify = true, tracers = true;
 
     public record Waypoint(String name, int x, int y, int z) {}
     public static final java.util.List<Waypoint> waypoints = new java.util.ArrayList<>();
@@ -68,13 +69,20 @@ public class Config {
         return 0;
     }
 
+    /**
+     * SusChunks only counts these when they are buried underground (overworld), so the list is things that
+     * mean "someone built here": storage, beds, signs, and building materials.
+     */
     private static int susWeight(Block b) {
+        int base = baseWeight(b);
+        if (base >= 2) return base;
         if (b instanceof DoorBlock) return 2;
         if (b instanceof TrapDoorBlock || b instanceof FenceBlock) return 1;
         String p = name(b);
-        if (p.endsWith("_planks") || p.endsWith("_wool") || p.contains("concrete")
-                || p.endsWith("glazed_terracotta") || p.endsWith("glass") || p.endsWith("glass_pane")
-                || p.endsWith("bricks") || p.startsWith("polished_") || p.equals("cobblestone")) return 1;
+        if (p.endsWith("_planks") || p.endsWith("_wool")) return 1;
+        if (p.contains("concrete") || p.endsWith("glazed_terracotta")) return 2;
+        if (p.endsWith("glass") || p.endsWith("glass_pane")) return 1;
+        if (p.equals("bricks") || p.equals("obsidian") || p.contains("quartz") || p.equals("smooth_stone")) return 2;
         return 0;
     }
 
@@ -91,6 +99,11 @@ public class Config {
             if (root.has("beams")) beams = root.get("beams").getAsBoolean();
             if (root.has("plates")) plates = root.get("plates").getAsBoolean();
             if (root.has("notify")) notify = root.get("notify").getAsBoolean();
+            if (root.has("tracers")) tracers = root.get("tracers").getAsBoolean();
+            if (root.has("susDensity")) susDensity = root.get("susDensity").getAsInt();
+            if (root.has("susDepth")) susDepth = root.get("susDepth").getAsInt();
+            if (root.has("baseColorIdx")) baseColorIdx = Math.floorMod(root.get("baseColorIdx").getAsInt(), COLORS.length);
+            if (root.has("susColorIdx")) susColorIdx = Math.floorMod(root.get("susColorIdx").getAsInt(), COLORS.length);
             if (root.has("waypoints")) {
                 waypoints.clear();
                 for (JsonElement el : root.getAsJsonArray("waypoints")) {
@@ -127,6 +140,11 @@ public class Config {
             root.addProperty("beams", beams);
             root.addProperty("plates", plates);
             root.addProperty("notify", notify);
+            root.addProperty("tracers", tracers);
+            root.addProperty("susDensity", susDensity);
+            root.addProperty("susDepth", susDepth);
+            root.addProperty("baseColorIdx", baseColorIdx);
+            root.addProperty("susColorIdx", susColorIdx);
             JsonArray wps = new JsonArray();
             for (Waypoint w : waypoints) {
                 JsonObject o = new JsonObject();

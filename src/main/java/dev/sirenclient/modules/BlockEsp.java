@@ -1,6 +1,7 @@
 package dev.sirenclient.modules;
 
 import dev.sirenclient.Config;
+import dev.sirenclient.TestBases;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
@@ -20,7 +21,9 @@ public class BlockEsp extends ChunkScanModule<BlockEsp.Found> {
 
     public BlockEsp() { super("BlockESP", "Highlights chosen blocks through walls"); }
 
-    @Override protected boolean keep(Found f) { return f.size() > 0; }
+    @Override protected boolean keep(Found f) {
+        return f.size() > 0 && !TestBases.isHidden(f.xyz()[0] >> 4, f.xyz()[2] >> 4); // larp: hidden until relog
+    }
 
     @Override
     protected Found scan(LevelChunk chunk) {

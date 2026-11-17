@@ -31,6 +31,7 @@ public class BlockEsp extends ChunkScanModule<BlockEsp.Found> {
         if (w.isEmpty()) return null;
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null) return null;
+        if (Structures.isTrialChunk(chunk)) return null;   // no chests/spawners ESP inside trial chambers
         int minSec = mc.level.dimensionType().minY() >> 4;
         int[] xyz = new int[MAX_PER_CHUNK * 3];
         int[] rgb = new int[MAX_PER_CHUNK];

@@ -2,9 +2,11 @@ package dev.sirenclient;
 
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -19,14 +21,20 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.Container;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.ItemLore;
 import net.minecraft.world.item.enchantment.Enchantment;
 import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.LiquidBlock;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.SignBlockEntity;
+import net.minecraft.world.level.block.entity.SignText;
 import net.minecraft.world.level.block.entity.SpawnerBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
@@ -51,7 +59,7 @@ import java.util.zip.GZIPInputStream;
 public final class TestBases {
     public static final List<String> info = new CopyOnWriteArrayList<>();   // recent spawns, shown in the menu
     /** Average seconds of gliding between bases (each gap is randomised +-40%). Set from the menu slider. */
-    public static int avgSeconds = 100;
+    public static int avgSeconds = 150;
 
     private static final Random RNG = new Random();
     private static final ConcurrentLinkedQueue<Job> jobs = new ConcurrentLinkedQueue<>();
@@ -73,6 +81,12 @@ public final class TestBases {
     public static boolean showDigBeacons = true;
     private static Object armedLevel = null;
 
+    // staggered reveal after the relog (client thread only) + position history for the fake rubberband
+    private static final List<Box> revealQueue = new ArrayList<>();
+    private static boolean revealing = false;
+    private static int revealWait = 0, revealTotal = 0;
+    private static final ArrayDeque<Vec3> posHistory = new ArrayDeque<>();
+
     private static final int BLOCKS_PER_TICK = 6_000;
     private static final int MAX_VOLUME = 12_000_000;
     private static final int TOP_Y = -10;      // top of every pasted schematic
@@ -91,6 +105,9 @@ public final class TestBases {
     public static boolean isLarp() { return larp; }
     public static int hiddenCount() { return hidden.size(); }
     public static boolean isMinedDown() { return minedDown; }
+    public static boolean isRevealing() { return revealing; }
+    public static int revealTotal() { return revealTotal; }
+    public static int revealDone() { return revealTotal - revealQueue.size(); }
     public static List<int[]> digSpots() { return showDigBeacons ? digSpots : List.of(); }
 
     public static String setLarp(boolean on) {
@@ -113,7 +130,8 @@ public final class TestBases {
     }
 
     private static int rollInterval() {
-        return (int) (avgSeconds * 20 * (0.6 + RNG.nextDouble() * 0.8));
+        double dry = RNG.nextDouble() < 0.18 ? 2.0 + RNG.nextDouble() * 1.5 : 1.0;   // now and then a long dry spell
+        return (int) (avgSeconds * 20 * (0.6 + RNG.nextDouble() * 0.8) * dry);
     }
 
     private static void clientTick(Minecraft mc) {
@@ -126,6 +144,9 @@ public final class TestBases {
             world = w;
             hidden.clear();
             digSpots.clear();
+            revealQueue.clear();
+            revealing = false;
+            posHistory.clear();
             info.clear();
             minedDown = false;
             armedLevel = null;
@@ -133,11 +154,15 @@ public final class TestBases {
             nextAt = rollInterval();
         }
 
+        posHistory.addLast(mc.player.position());
+        while (posHistory.size() > 14) posHistory.removeFirst();
+
         checkReveal(mc);
         // Once you have been deep underground with a hidden base waiting, the next relog reveals it.
-        if (!hidden.isEmpty() && !minedDown && mc.player.getY() < 0) {
+        if (!hidden.isEmpty() && !minedDown && !revealing && mc.player.getY() < 0) {
             minedDown = true;
             armedLevel = mc.level;
+            if (larp && FakeHud.rubberband && posHistory.size() >= 10) rubberband(server, mc);
         }
 
         if (!larp || mc.level.dimension() != Level.OVERWORLD) return;
@@ -152,17 +177,47 @@ public final class TestBases {
     /** Relog (or dimension change) after mining down: hidden bases become visible to the ESP. */
     private static void checkReveal(Minecraft mc) {
         if (minedDown && mc.level != null && mc.level != armedLevel) {
-            hidden.clear();
-            digSpots.clear();
+            digSpots.clear();                      // the beacons go away on the relog
             minedDown = false;
             armedLevel = null;
+            if (!hidden.isEmpty()) {
+                revealQueue.clear();
+                revealQueue.addAll(hidden);
+                Collections.shuffle(revealQueue, RNG);
+                revealTotal = revealQueue.size();
+                revealing = true;
+                revealWait = 20 + RNG.nextInt(40);
+                if (FakeHud.lagSpike) {            // short stutter, like a heavy chunk load
+                    try { Thread.sleep(200 + RNG.nextInt(150)); } catch (InterruptedException ignored) {}
+                }
+            }
         }
+        // Sites pop into the ESP one at a time (the scanners pick them up on their next pass).
+        if (revealing) {
+            if (revealQueue.isEmpty()) { revealing = false; return; }
+            if (--revealWait <= 0) {
+                hidden.remove(revealQueue.remove(0));
+                revealWait = 30 + RNG.nextInt(80);
+                if (revealQueue.isEmpty()) revealing = false;
+            }
+        }
+    }
+
+    /** Fake anticheat setback: snap the player back to where they were about 0.7 s ago. */
+    private static void rubberband(MinecraftServer server, Minecraft mc) {
+        Vec3 b = posHistory.peekFirst();
+        if (b == null) return;
+        float yr = mc.player.getYRot(), xr = mc.player.getXRot();
+        UUID id = mc.player.getUUID();
+        server.execute(() -> {
+            ServerPlayer sp = server.getPlayerList().getPlayer(id);
+            if (sp != null) sp.connection.teleport(b.x, b.y, b.z, yr, xr);
+        });
     }
 
     /** Called by the scanners: true while this chunk belongs to a base that should not show in the ESP yet. */
     public static boolean isHidden(int cx, int cz) {
         if (hidden.isEmpty()) return false;
-        checkReveal(Minecraft.getInstance());
         for (Box b : hidden)
             if (cx >= b.minCx() && cx <= b.maxCx() && cz >= b.minCz() && cz <= b.maxCz()) return true;
         return false;
@@ -254,7 +309,8 @@ public final class TestBases {
             int y3 = l.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, ax + w - 1, az + d - 1);
             if (Math.abs(y2 - y) > 4 || Math.abs(y3 - y) > 4) continue;                    // too steep
             Block wall = SURFACE_WALLS[RNG.nextInt(SURFACE_WALLS.length)];
-            house(l, ax, y, az, w, d, wall, 4 + RNG.nextInt(7));
+            house(l, ax, y, az, w, d, wall, RNG.nextDouble() < 0.2 ? -1 : 4 + RNG.nextInt(7));   // -1 = junk base
+            ownerSign(l, ax + w / 2 + 1, y, az - 1);
             log("Surface: x " + ax + " z " + az);
             return true;
         }
@@ -265,7 +321,7 @@ public final class TestBases {
         int w = 7 + RNG.nextInt(6), d = 7 + RNG.nextInt(6), y0 = -50 + RNG.nextInt(30);
         Block wall = BURIED_WALLS[RNG.nextInt(BURIED_WALLS.length)];
         hide(x0, z0, w, d);                                  // hidden before the first block exists
-        buried(l, x0, z0, w, d, y0, wall, 4 + RNG.nextInt(7));
+        buried(l, x0, z0, w, d, y0, wall, RNG.nextDouble() < 0.2 ? -1 : 4 + RNG.nextInt(7));
         log("Buried:  x " + x0 + " z " + z0 + " y " + y0);
     }
 
@@ -312,11 +368,41 @@ public final class TestBases {
     public static String gear() {
         MinecraftServer server = Minecraft.getInstance().getSingleplayerServer();
         if (server == null) return "Singleplayer only.";
+        ensurePickHook();
         server.execute(() -> {
             var reg = server.registryAccess().lookupOrThrow(Registries.ENCHANTMENT);
             for (ServerPlayer p : server.getPlayerList().getPlayers()) giveGear(p, reg);
         });
         return "Gave raid gear (elytra is on, chestplate is in your inventory).";
+    }
+
+    // ---- Amethyst Pickaxe: mines a 3x3 like DonutSMP's ----
+    private static final String PICK_NAME = "Amethyst Pickaxe";
+    private static boolean pickHooked = false;
+
+    private static void ensurePickHook() {
+        if (pickHooked) return;
+        pickHooked = true;
+        PlayerBlockBreakEvents.AFTER.register(TestBases::onBreak);
+    }
+
+    /** After the block you mined breaks, also break the 8 around it. Looking up/down = flat 3x3, otherwise a wall 3x3. */
+    private static void onBreak(Level level, Player player, BlockPos pos, BlockState state, BlockEntity be) {
+        if (!(level instanceof ServerLevel sl) || !(player instanceof ServerPlayer)) return;
+        ItemStack tool = player.getMainHandItem();
+        if (!tool.is(Items.NETHERITE_PICKAXE) || !PICK_NAME.equals(tool.getHoverName().getString())) return;
+        boolean flat = Math.abs(player.getXRot()) > 50;
+        Direction.Axis facing = player.getDirection().getAxis();
+        for (int a = -1; a <= 1; a++)
+            for (int b = -1; b <= 1; b++) {
+                if (a == 0 && b == 0) continue;
+                BlockPos p = flat ? pos.offset(a, 0, b)
+                        : facing == Direction.Axis.X ? pos.offset(0, a, b) : pos.offset(a, b, 0);
+                BlockState st = sl.getBlockState(p);
+                if (st.isAir() || st.getBlock() instanceof LiquidBlock || st.getDestroySpeed(sl, p) < 0) continue; // skips bedrock
+                if (!player.isCreative()) Block.dropResources(st, sl, p, sl.getBlockEntity(p), player, tool);
+                sl.destroyBlock(p, false, player);
+            }
     }
 
     private static void ench(ItemStack s, HolderLookup.RegistryLookup<Enchantment> reg, ResourceKey<Enchantment> key, int lvl) {
@@ -346,14 +432,17 @@ public final class TestBases {
         p.setItemSlot(EquipmentSlot.CHEST, elytra);
         give(p, armor(Items.NETHERITE_CHESTPLATE, reg));
 
-        // Drill: a heavily enchanted netherite pickaxe with a custom name.
+        // Amethyst Pickaxe: DonutSMP-style netherite pickaxe that mines a 3x3.
         ItemStack drill = new ItemStack(Items.NETHERITE_PICKAXE);
         ench(drill, reg, Enchantments.EFFICIENCY, 10);
         ench(drill, reg, Enchantments.UNBREAKING, 5);
         ench(drill, reg, Enchantments.FORTUNE, 3);
         ench(drill, reg, Enchantments.MENDING, 1);
         drill.set(DataComponents.CUSTOM_NAME,
-                Component.literal("Amethyst Drill").withStyle(Style.EMPTY.withColor(ChatFormatting.LIGHT_PURPLE).withItalic(false)));
+                Component.literal(PICK_NAME).withStyle(Style.EMPTY.withColor(ChatFormatting.AQUA).withItalic(false)));
+        drill.set(DataComponents.LORE, new ItemLore(List.of(
+                Component.literal("A powerful pickaxe crafted from amethyst").withStyle(Style.EMPTY.withColor(ChatFormatting.LIGHT_PURPLE).withItalic(false)),
+                Component.literal("that mines in a 3x3 area!").withStyle(Style.EMPTY.withColor(ChatFormatting.LIGHT_PURPLE).withItalic(false)))));
         give(p, drill);
 
         p.setItemSlot(EquipmentSlot.OFFHAND, new ItemStack(Items.TOTEM_OF_UNDYING));
@@ -407,10 +496,16 @@ public final class TestBases {
 
     private static void storage(ServerLevel l, int x0, int y, int z0, int w, int d, int chests) {
         int inner = w - 2;
+        boolean junk = chests < 0;                           // decoy: a chest or two of rubbish, nothing else
+        if (junk) chests = 1 + RNG.nextInt(2);
         for (int i = 0; i < Math.min(chests, inner * 2); i++) {
             BlockPos pos = new BlockPos(x0 + 1 + i % inner, y, z0 + 1 + i / inner);
             l.setBlock(pos, Blocks.CHEST.defaultBlockState(), 2);
-            fill(l, pos);
+            if (junk) fillJunk(l, pos); else fill(l, pos);
+        }
+        if (junk) {
+            set(l, x0 + 1, y, z0 + d - 3, Blocks.TORCH);
+            return;
         }
         Block[] back = {Blocks.BARREL, Blocks.BARREL, Blocks.SHULKER_BOX, Blocks.SHULKER_BOX, Blocks.ENDER_CHEST,
                 Blocks.FURNACE, Blocks.CRAFTING_TABLE, Blocks.BARREL, Blocks.SHULKER_BOX};
@@ -429,6 +524,27 @@ public final class TestBases {
         if (!(l.getBlockEntity(pos) instanceof Container c)) return;
         int n = 3 + RNG.nextInt(10);
         for (int i = 0; i < n; i++) c.setItem(RNG.nextInt(c.getContainerSize()), loot());
+    }
+
+    private static void fillJunk(ServerLevel l, BlockPos pos) {
+        if (!(l.getBlockEntity(pos) instanceof Container c)) return;
+        Item[] junk = {Items.ROTTEN_FLESH, Items.STICK, Items.COBBLESTONE, Items.STRING, Items.BONE, Items.DIRT, Items.COAL};
+        int n = 2 + RNG.nextInt(6);
+        for (int i = 0; i < n; i++) c.setItem(RNG.nextInt(c.getContainerSize()), new ItemStack(junk[RNG.nextInt(junk.length)], 1 + RNG.nextInt(20)));
+    }
+
+    /** A standing sign outside the door with a made-up owner name. */
+    private static void ownerSign(ServerLevel l, int x, int y, int z) {
+        BlockPos pos = new BlockPos(x, y, z);
+        if (!l.getBlockState(pos).isAir() || l.getBlockState(pos.below()).isAir()) return;
+        l.setBlock(pos, Blocks.OAK_SIGN.defaultBlockState(), 2);
+        if (l.getBlockEntity(pos) instanceof SignBlockEntity sign) {
+            SignText t = new SignText()
+                    .setMessage(1, Component.literal("Owner:"))
+                    .setMessage(2, Component.literal(FakeHud.randomName(RNG)));
+            sign.setText(t, true);
+            sign.setChanged();
+        }
     }
 
     private static ItemStack loot() {

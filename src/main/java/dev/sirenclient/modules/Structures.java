@@ -14,7 +14,7 @@ import java.util.Map;
 public final class Structures {
     public static final int N = 9;
     // village, mineshaft, stronghold/ruins, ancient city, trial chambers, monument, nether, end city, ruined portal
-    private static final int[] NEED = {20, 20, 10, 8, 6, 20, 20, 10, 6};
+    private static final int[] NEED = {20, 20, 10, 8, 12, 20, 20, 10, 6};
     private static Map<Block, Integer> map;
 
     private Structures() {}
@@ -28,6 +28,32 @@ public final class Structures {
     public static Map<Block, Integer> map() {
         if (map == null) build();
         return map;
+    }
+
+    /** Blocks that make up trial chambers (tuff bricks and the copper bulbs / grates / chiseled copper). */
+    private static boolean isTrialBlock(String p) {
+        if (p.contains("tuff_brick") || p.equals("chiseled_tuff") || p.startsWith("polished_tuff")) return true;
+        return p.contains("copper_bulb") || p.contains("copper_grate") || p.contains("chiseled_copper");
+    }
+
+    private static final int TRIAL = 4;
+
+    /** True if this chunk is part of a trial chamber. Used so the base/ESP scanners ignore it. */
+    public static boolean isTrialChunk(net.minecraft.world.level.chunk.LevelChunk chunk) {
+        Map<Block, Integer> m = map();
+        int sum = 0;
+        for (var sec : chunk.getSections()) {
+            if (sec == null || sec.hasOnlyAir()) continue;
+            if (!sec.maybeHas(st -> { Integer v = m.get(st.getBlock()); return v != null && v / 1000 == TRIAL; })) continue;
+            for (int x = 0; x < 16; x++)
+                for (int y = 0; y < 16; y++)
+                    for (int z = 0; z < 16; z++) {
+                        Integer v = m.get(sec.getBlockState(x, y, z).getBlock());
+                        if (v != null && v / 1000 == TRIAL) sum += v % 1000;
+                    }
+            if (sum >= NEED[TRIAL]) return true;
+        }
+        return false;
     }
 
     private static void build() {
@@ -55,7 +81,8 @@ public final class Structures {
                 case "end_stone_bricks" -> { c = 7; w = 1; }
                 case "crying_obsidian" -> { c = 8; w = 3; }
                 default -> {
-                    if (p.contains("nether_brick") || p.contains("blackstone")) { c = 6; w = 1; }
+                    if (isTrialBlock(p)) { c = 4; w = p.contains("copper") ? 2 : 1; }
+                    else if (p.contains("nether_brick") || p.contains("blackstone")) { c = 6; w = 1; }
                     else if (p.contains("purpur")) { c = 7; w = 1; }
                 }
             }

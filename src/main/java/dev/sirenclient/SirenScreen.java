@@ -312,11 +312,15 @@ public class SirenScreen extends Screen {
         });
         btn("Get gear", cx + 100, y, 100, () -> { status = TestBases.gear(); rebuildWidgets(); });
         btn("Spawn one now", cx + 204, y, 112, () -> { status = TestBases.spawnNow(); rebuildWidgets(); });
+        y += 24;
+        btn("Spawner cages now", cx, y, 130, () -> { status = TestBases.spawnSpawnersNow(); rebuildWidgets(); });
+        y += 24;
+        toggleRow(y, "Dig-down beacons (yellow lines)", TestBases.showDigBeacons, () -> TestBases.showDigBeacons = !TestBases.showDigBeacons);
         y += 28;
         TestBases.folder(); // makes sure siren-schematics/ exists (optional, used for some buried bases)
         labels.add(new Label("Singleplayer survival only. Bases appear ahead while you glide.", cx, y, GRAY));
         y += 11;
-        labels.add(new Label("Buried ones stay out of the ESP until you go below Y 0 and relog.", cx, y, GRAY));
+        labels.add(new Label("Buried bases + spawner cages stay out of the ESP until you go below Y 0 and relog.", cx, y, GRAY));
         y += 15;
         int hid = TestBases.hiddenCount();
         labels.add(new Label("Hidden bases waiting: " + hid + (hid > 0 ? (TestBases.isMinedDown() ? "   (mined down, relog now)" : "   (mine below Y 0, then relog)") : ""),

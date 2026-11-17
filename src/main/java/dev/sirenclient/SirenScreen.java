@@ -348,6 +348,10 @@ public class SirenScreen extends Screen {
         btn("Change", cx + 244, y, 72, () -> { next.run(); rebuildWidgets(); });
     }
 
+    private void slider(int y, String label, int min, int max, int step, int cur, IntConsumer setter) {
+        addRenderableWidget(new Slider(cx, y, 316, label, min, max, step, cur, setter));
+    }
+
     /** Integer slider with a live label; the value is applied immediately and saved when the menu closes. */
     private static class Slider extends AbstractSliderButton {
         private final String label;

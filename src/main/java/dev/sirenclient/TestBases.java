@@ -81,6 +81,17 @@ public final class TestBases {
     public static boolean showDigBeacons = true;
     private static Object armedLevel = null;
 
+    // bonus base after a dig-down relog: sometimes (not every time) one appears a few seconds of flight away
+    private static final double NEAR_CHANCE = 0.35;
+    private static final long NEAR_COOLDOWN_MS = 4 * 60_000L;   // only starts once you actually FIND a bonus base
+    private static final int FOUND_RADIUS = 40;                    // blocks (horizontal) that count as "found"
+    private static final int ABANDON_RADIUS = 300;                 // fly this far from an unfound one and it is dropped
+    private static long lastFoundAt = 0;
+    private static volatile boolean nearPending = false;           // a bonus base is out there and not found yet
+    private static volatile int nearX = 0, nearZ = 0;
+    private static volatile int placedX = 0, placedZ = 0;          // centre of the last surface base placed
+    private static int nearWait = -1;     // client ticks until the bonus base is placed, -1 = none pending
+
     // staggered reveal after the relog (client thread only) + position history for the fake rubberband
     private static final List<Box> revealQueue = new ArrayList<>();
     private static boolean revealing = false;
@@ -150,6 +161,9 @@ public final class TestBases {
             info.clear();
             minedDown = false;
             armedLevel = null;
+            nearWait = -1;
+            lastFoundAt = 0;
+            nearPending = false;
             flightTicks = 0;
             nextAt = rollInterval();
         }
@@ -158,11 +172,18 @@ public final class TestBases {
         while (posHistory.size() > 14) posHistory.removeFirst();
 
         checkReveal(mc);
+        if (nearWait >= 0 && --nearWait < 0) spawnNear(mc, server);
+        if (nearPending) {   // cooldown starts only when you find the bonus base
+            double ddx = mc.player.getX() - nearX, ddz = mc.player.getZ() - nearZ, d2 = ddx * ddx + ddz * ddz;
+            if (d2 <= FOUND_RADIUS * FOUND_RADIUS) { nearPending = false; lastFoundAt = System.currentTimeMillis(); }
+            else if (d2 > (double) ABANDON_RADIUS * ABANDON_RADIUS) nearPending = false;   // gave up on it, no cooldown
+        }
         // Once you have been deep underground with a hidden base waiting, the next relog reveals it.
-        if (!hidden.isEmpty() && !minedDown && !revealing && mc.player.getY() < 0) {
+        // (with larp on this also arms when nothing is hidden, so the relog can still bring a nearby base.)
+        if ((!hidden.isEmpty() || larp) && !minedDown && !revealing && mc.player.getY() < 0) {
             minedDown = true;
             armedLevel = mc.level;
-            if (larp && FakeHud.rubberband && posHistory.size() >= 10) rubberband(server, mc);
+            if (larp && !hidden.isEmpty() && FakeHud.rubberband && posHistory.size() >= 10) rubberband(server, mc);
         }
 
         if (!larp || mc.level.dimension() != Level.OVERWORLD) return;
@@ -180,6 +201,10 @@ public final class TestBases {
             digSpots.clear();                      // the beacons go away on the relog
             minedDown = false;
             armedLevel = null;
+            long now = System.currentTimeMillis();
+            if (larp && !nearPending && now - lastFoundAt > NEAR_COOLDOWN_MS && RNG.nextDouble() < NEAR_CHANCE) {
+                nearWait = 60 + RNG.nextInt(80);  // 3-7 s after the relog, once the chunks around you have loaded
+            }
             if (!hidden.isEmpty()) {
                 revealQueue.clear();
                 revealQueue.addAll(hidden);
@@ -297,6 +322,27 @@ public final class TestBases {
         }
     }
 
+    /** Bonus base after a relog: a visible surface base 70-120 blocks away, about 1-3 s of elytra flight. */
+    private static void spawnNear(Minecraft mc, MinecraftServer server) {
+        if (!larp || mc.player == null || mc.level == null || mc.level.dimension() != Level.OVERWORLD) return;
+        var p = mc.player;
+        double px = p.getX(), pz = p.getZ();
+        Vec3 look = p.getLookAngle();
+        double base = (look.x * look.x + look.z * look.z) > 0.01 ? Math.atan2(look.z, look.x) : RNG.nextDouble() * Math.PI * 2;
+        ServerLevel level = server.overworld();
+        server.execute(() -> {
+            for (int attempt = 0; attempt < 6; attempt++) {
+                double ang = base + Math.toRadians(RNG.nextInt(121) - 60) + (attempt > 2 ? Math.PI * RNG.nextDouble() * 2 : 0);
+                double dist = 70 + RNG.nextInt(51);
+                int x = (int) Math.floor(px + Math.cos(ang) * dist), z = (int) Math.floor(pz + Math.sin(ang) * dist);
+                if (placeSurface(level, x, z)) {   // visible straight away, no hiding
+                    nearX = placedX; nearZ = placedZ; nearPending = true;
+                    return;
+                }
+            }
+        });
+    }
+
     private static boolean placeSurface(ServerLevel l, int x0, int z0) {
         for (int a = 0; a < 6; a++) {
             int w = 7 + RNG.nextInt(5), d = 7 + RNG.nextInt(5);
@@ -311,6 +357,7 @@ public final class TestBases {
             Block wall = SURFACE_WALLS[RNG.nextInt(SURFACE_WALLS.length)];
             house(l, ax, y, az, w, d, wall, RNG.nextDouble() < 0.2 ? -1 : 4 + RNG.nextInt(7));   // -1 = junk base
             ownerSign(l, ax + w / 2 + 1, y, az - 1);
+            placedX = mx; placedZ = mz;
             log("Surface: x " + ax + " z " + az);
             return true;
         }
@@ -433,7 +480,7 @@ public final class TestBases {
 
         // Amethyst Pickaxe: DonutSMP-style netherite pickaxe that mines a 3x3.
         ItemStack drill = new ItemStack(Items.NETHERITE_PICKAXE);
-        ench(drill, reg, Enchantments.EFFICIENCY, 10);
+        ench(drill, reg, Enchantments.EFFICIENCY, 5);   // a bit slower than before (was 10)
         ench(drill, reg, Enchantments.UNBREAKING, 5);
         ench(drill, reg, Enchantments.FORTUNE, 3);
         ench(drill, reg, Enchantments.MENDING, 1);

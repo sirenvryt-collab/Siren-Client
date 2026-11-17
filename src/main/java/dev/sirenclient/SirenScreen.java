@@ -24,7 +24,7 @@ import java.util.function.IntConsumer;
 public class SirenScreen extends Screen {
     private static final int W = 440, H = 280;
     private static final int ACCENT = 0xFF2EE6A6, WHITE = 0xFFFFFFFF, GRAY = 0xFF8899AA, DIM = 0xFF5C6B78;
-    private static final String[] TABS = {"Modules", "Blocks", "Results", "Waypoints", "Scan", "Visuals"};
+    private static final String[] TABS = {"Modules", "Blocks", "Results", "Waypoints", "Scan", "Visuals", "Test"};
     private static final String[] LISTS = {"base", "sus", "esp"};
 
     private static int tab = 0, page = 0, weight = 2, colorIdx = 0;
@@ -66,7 +66,8 @@ public class SirenScreen extends Screen {
             case 2 -> resultsTab();
             case 3 -> waypointsTab();
             case 4 -> scanTab();
-            default -> visualsTab();
+            case 5 -> visualsTab();
+            default -> testTab();
         }
     }
 
@@ -294,7 +295,32 @@ public class SirenScreen extends Screen {
         y += 28;
         labels.add(new Label("Tracers: all base/sus hits, nearest 16 BlockESP blocks, players, waypoints.", cx, y, GRAY));
     }
-
+    // ---------- tab: test ----------
+    private void testTab() {
+        int y = cy;
+        btn("Scanners on", cx, y, 96, () -> {
+            Module[] mods = {SirenClient.modules.base, SirenClient.modules.sus,
+                    SirenClient.modules.newChunks, SirenClient.modules.blockEsp};
+            for (Module m : mods) if (!m.isEnabled()) m.toggle();
+            status = "BaseFinder, SusChunks, NewChunks, BlockESP are on.";
+            rebuildWidgets();
+        });
+        btn("Spawn bases", cx + 100, y, 112, () -> { status = TestBases.spawn(); rebuildWidgets(); });
+        btn("Get elytra", cx + 216, y, 100, () -> { status = TestBases.gear(); rebuildWidgets(); });
+        y += 30;
+        labels.add(new Label("Singleplayer only. Builds test bases around where you stand:", cx, y, GRAY));
+        y += 14;
+        for (String s : TestBases.info) { labels.add(new Label(s, cx, y, WHITE)); y += 11; }
+        y += 8;
+        for (String s : new String[]{
+                "Expect: 2 BaseFinder hits (surface houses) and 1 SusChunks hit",
+                "(buried room). The decoy has a bell, so SusChunks should skip it.",
+                "Fly toward the coordinates; hits appear as chunks load."}) {
+            labels.add(new Label(s, cx, y, GRAY));
+            y += 11;
+        }
+        if (!status.isEmpty()) labels.add(new Label(status, cx, y0 + H - 30, ACCENT));
+    }
     // ---------- widgets ----------
     private void slider(int y, String label, int min, int max, int step, int cur, IntConsumer setter) {
         addRenderableWidget(new Slider(cx, y, 316, label, min, max, step, cur, setter));

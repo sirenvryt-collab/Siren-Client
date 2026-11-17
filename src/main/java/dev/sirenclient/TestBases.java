@@ -228,9 +228,9 @@ public final class TestBases {
         ServerLevel level = server.overworld();
 
         double roll = forceSpawners ? 0 : RNG.nextDouble();
-        if (roll < 0.15) {                                   // spawner cages near bedrock: hidden until dig down + relog
+        if (roll < 0.01) {                                   // spawner cages near bedrock: hidden until dig down + relog
             server.execute(() -> placeSpawners(level, x, z));
-        } else if (roll < 0.55) {                            // buried: hidden until mine down + relog
+        } else if (roll < 0.41) {                            // buried: hidden until mine down + relog
             List<Path> files = schematicFiles();
             if (!files.isEmpty() && RNG.nextDouble() < 0.6) {
                 queueSchematic(files.get(RNG.nextInt(files.size())), level, x, z);

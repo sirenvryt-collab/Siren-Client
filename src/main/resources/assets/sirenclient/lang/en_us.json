@@ -1,4 +1,9 @@
 {
   "key.sirenclient.menu": "Open Menu",
+  "key.sirenclient.toggle.basefinder": "Toggle BaseFinder",
+  "key.sirenclient.toggle.suschunks": "Toggle SusChunks",
+  "key.sirenclient.toggle.newchunks": "Toggle NewChunks",
+  "key.sirenclient.toggle.blockesp": "Toggle BlockESP",
+  "key.sirenclient.toggle.playeresp": "Toggle PlayerESP",
   "key.category.sirenclient.main": "Siren Client"
 }

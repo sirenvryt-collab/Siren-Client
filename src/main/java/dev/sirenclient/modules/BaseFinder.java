@@ -10,6 +10,7 @@ public class BaseFinder extends HitScanModule {
 
     @Override
     protected Hit scan(LevelChunk chunk) {
+        if (Structures.isTrialChunk(chunk)) return null;   // trial chambers are natural, not bases
         return scanWeights(chunk, Config.lists.get("base"));
     }
 }

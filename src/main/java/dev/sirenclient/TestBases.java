@@ -1,22 +1,35 @@
 package dev.sirenclient;
 
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.Style;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.Container;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.enchantment.Enchantment;
+import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.phys.Vec3;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -28,114 +41,353 @@ import java.util.stream.Stream;
 import java.util.zip.GZIPInputStream;
 
 /**
- * Singleplayer test helper: builds known bases around you so every module has something to find, and
- * pastes random schematics from siren-schematics/ in the game folder deep underground.
+ * Larp mode (singleplayer only). While you glide around in survival, a base is placed far ahead of you now
+ * and then. Surface bases show up in the ESP as soon as their chunks load. Buried bases are hidden from the
+ * ESP until you have been below Y 0 and relogged, so it looks like you had to dig down and reconnect to
+ * make the scanner pick them up. "Get gear" hands out base-raiding gear.
  */
 public final class TestBases {
-    public static final List<String> info = new CopyOnWriteArrayList<>();       // built-in test bases
-    public static final List<String> schemInfo = new CopyOnWriteArrayList<>();  // pasted schematics
+    public static final List<String> info = new CopyOnWriteArrayList<>();   // recent spawns, shown in the menu
+    /** Average seconds of gliding between bases (each gap is randomised +-40%). Set from the menu slider. */
+    public static int avgSeconds = 100;
 
+    private static final Random RNG = new Random();
     private static final ConcurrentLinkedQueue<Job> jobs = new ConcurrentLinkedQueue<>();
     private static boolean hooked = false;
+    private static boolean larp = false;
     private static int unknown = 0; // unknown block types met while loading the current schematic
 
-    private static final int BLOCKS_PER_TICK = 20_000;
+    // spawn timing
+    private static int flightTicks = 0, nextAt = 0;
+    private static String world = "";
+
+    // hide-until-relog state (touched from client and server threads, so the list is copy-on-write)
+    private record Box(int minCx, int minCz, int maxCx, int maxCz) {}
+    private static final List<Box> hidden = new CopyOnWriteArrayList<>();
+    private static boolean minedDown = false;
+    private static Object armedLevel = null;
+
+    private static final int BLOCKS_PER_TICK = 6_000;
     private static final int MAX_VOLUME = 12_000_000;
-    private static final int TOP_Y = -10;      // top of every pasted base
-    private static final int FLOOR_Y = -60;    // lowest the bottom may go
+    private static final int TOP_Y = -10;      // top of every pasted schematic
+    private static final int FLOOR_Y = -60;    // lowest a pasted schematic may go
+
+    private static final Block[] SURFACE_WALLS = {Blocks.OAK_PLANKS, Blocks.SPRUCE_PLANKS, Blocks.DARK_OAK_PLANKS,
+            Blocks.BIRCH_PLANKS, Blocks.STONE_BRICKS, Blocks.COBBLESTONE};
+    private static final Block[] BURIED_WALLS = {Blocks.OAK_PLANKS, Blocks.SPRUCE_PLANKS, Blocks.DARK_OAK_PLANKS,
+            Blocks.BIRCH_PLANKS};
 
     private TestBases() {}
 
     // =====================================================================
-    // Built-in test bases
+    // Larp switch + timing
     // =====================================================================
-    public static String spawn() {
+    public static boolean isLarp() { return larp; }
+    public static int hiddenCount() { return hidden.size(); }
+    public static boolean isMinedDown() { return minedDown; }
+
+    public static String setLarp(boolean on) {
+        Minecraft mc = Minecraft.getInstance();
+        if (on && mc.getSingleplayerServer() == null) return "Singleplayer only.";
+        larp = on;
+        if (on) {
+            ensureHooks();
+            flightTicks = 0;
+            nextAt = rollInterval();
+        }
+        return on ? "Larp on. Glide around and bases will appear ahead." : "Larp off.";
+    }
+
+    private static void ensureHooks() {
+        if (hooked) return;
+        hooked = true;
+        ServerTickEvents.END_SERVER_TICK.register(TestBases::tick);
+        ClientTickEvents.END_CLIENT_TICK.register(TestBases::clientTick);
+    }
+
+    private static int rollInterval() {
+        return (int) (avgSeconds * 20 * (0.6 + RNG.nextDouble() * 0.8));
+    }
+
+    private static void clientTick(Minecraft mc) {
+        MinecraftServer server = mc.getSingleplayerServer();
+        if (server == null || mc.player == null || mc.level == null) return;
+
+        // Different save: forget everything from the old one. (A relog of the same save keeps the hidden list.)
+        String w = server.getWorldData().getLevelName();
+        if (!w.equals(world)) {
+            world = w;
+            hidden.clear();
+            info.clear();
+            minedDown = false;
+            armedLevel = null;
+            flightTicks = 0;
+            nextAt = rollInterval();
+        }
+
+        checkReveal(mc);
+        // Once you have been deep underground with a hidden base waiting, the next relog reveals it.
+        if (!hidden.isEmpty() && !minedDown && mc.player.getY() < 0) {
+            minedDown = true;
+            armedLevel = mc.level;
+        }
+
+        if (!larp || mc.level.dimension() != Level.OVERWORLD) return;
+        if (mc.player.isCreative() || mc.player.isSpectator()) return;   // survival only
+        if (!mc.player.isFallFlying()) return;                           // only counts while gliding
+        if (++flightTicks < nextAt) return;
+        flightTicks = 0;
+        nextAt = rollInterval();
+        spawnAhead(mc, server);
+    }
+
+    /** Relog (or dimension change) after mining down: hidden bases become visible to the ESP. */
+    private static void checkReveal(Minecraft mc) {
+        if (minedDown && mc.level != null && mc.level != armedLevel) {
+            hidden.clear();
+            minedDown = false;
+            armedLevel = null;
+        }
+    }
+
+    /** Called by the scanners: true while this chunk belongs to a base that should not show in the ESP yet. */
+    public static boolean isHidden(int cx, int cz) {
+        if (hidden.isEmpty()) return false;
+        checkReveal(Minecraft.getInstance());
+        for (Box b : hidden)
+            if (cx >= b.minCx() && cx <= b.maxCx() && cz >= b.minCz() && cz <= b.maxCz()) return true;
+        return false;
+    }
+
+    private static void hide(int x, int z, int w, int d) {
+        hidden.add(new Box(x >> 4, z >> 4, (x + w - 1) >> 4, (z + d - 1) >> 4));
+    }
+
+    private static void log(String s) {
+        info.add(s);
+        while (info.size() > 8) info.remove(0);
+    }
+
+    // =====================================================================
+    // Spawning
+    // =====================================================================
+    /** Menu button: drops a base ahead of you right now. */
+    public static String spawnNow() {
         Minecraft mc = Minecraft.getInstance();
         MinecraftServer server = mc.getSingleplayerServer();
         if (server == null) return "Singleplayer only.";
         if (mc.player == null || mc.level == null || mc.level.dimension() != Level.OVERWORLD)
             return "Be in the overworld first.";
-
-        int px = mc.player.getBlockX(), pz = mc.player.getBlockZ();
-        int ax = px + 150, az = pz;          // surface house
-        int bx = px, bz = pz + 250;          // surface house, more storage
-        int cx = px - 220, cz = pz;          // buried room (should be flagged by SusChunks)
-        int dx = px, dz = pz - 300;          // buried room + bell (natural marker, should NOT be flagged)
-
-        info.clear();
-        info.add("House A:  x " + ax + "  z " + az);
-        info.add("House B:  x " + bx + "  z " + bz);
-        info.add("Buried:   x " + cx + "  z " + cz + "  y -30");
-        info.add("Decoy:    x " + dx + "  z " + dz + "  y -30");
-
-        server.execute(() -> {
-            ServerLevel level = server.overworld();
-            house(level, ax, az, 0);
-            house(level, bx, bz, 4);
-            buried(level, cx, cz, false);
-            buried(level, dx, dz, true);
-        });
-        return "Placing bases (may stutter for a second).";
+        ensureHooks();
+        spawnAhead(mc, server);
+        return "Placed a base ahead of you.";
     }
 
+    private static void spawnAhead(Minecraft mc, MinecraftServer server) {
+        var p = mc.player;
+        Vec3 v = p.getDeltaMovement();
+        double dx = v.x, dz = v.z;
+        if (dx * dx + dz * dz < 0.01) { Vec3 l = p.getLookAngle(); dx = l.x; dz = l.z; }
+        double len = Math.sqrt(dx * dx + dz * dz);
+        if (len < 1e-4) { dx = 1; dz = 0; len = 1; }
+        dx /= len; dz /= len;
+
+        // Always beyond your render distance so nothing pops in where you can see it.
+        int minDist = Math.max(200, mc.options.getEffectiveRenderDistance() * 16 + 64);
+        double dist = minDist + RNG.nextInt(140);
+        double side = RNG.nextInt(141) - 70;
+        int x = (int) Math.floor(p.getX() + dx * dist - dz * side);
+        int z = (int) Math.floor(p.getZ() + dz * dist + dx * side);
+        ServerLevel level = server.overworld();
+
+        if (RNG.nextDouble() < 0.45) {                       // buried: hidden until mine down + relog
+            List<Path> files = schematicFiles();
+            if (!files.isEmpty() && RNG.nextDouble() < 0.6) {
+                queueSchematic(files.get(RNG.nextInt(files.size())), level, x, z);
+                return;
+            }
+            server.execute(() -> placeBuried(level, x, z));
+        } else {                                             // surface: shows once its chunks load
+            server.execute(() -> { if (!placeSurface(level, x, z)) placeBuried(level, x, z); });
+        }
+    }
+
+    private static boolean placeSurface(ServerLevel l, int x0, int z0) {
+        for (int a = 0; a < 6; a++) {
+            int w = 7 + RNG.nextInt(5), d = 7 + RNG.nextInt(5);
+            int ax = x0 + (a == 0 ? 0 : RNG.nextInt(97) - 48), az = z0 + (a == 0 ? 0 : RNG.nextInt(97) - 48);
+            int mx = ax + w / 2, mz = az + d / 2;
+            int y = l.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, mx, mz);
+            if (y <= 63) continue;                                                        // ocean / beach
+            if (!l.getBlockState(new BlockPos(mx, y - 1, mz)).getFluidState().isEmpty()) continue;
+            int y2 = l.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, ax, az);
+            int y3 = l.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, ax + w - 1, az + d - 1);
+            if (Math.abs(y2 - y) > 4 || Math.abs(y3 - y) > 4) continue;                    // too steep
+            Block wall = SURFACE_WALLS[RNG.nextInt(SURFACE_WALLS.length)];
+            house(l, ax, y, az, w, d, wall, 4 + RNG.nextInt(7));
+            log("Surface: x " + ax + " z " + az);
+            return true;
+        }
+        return false;
+    }
+
+    private static void placeBuried(ServerLevel l, int x0, int z0) {
+        int w = 7 + RNG.nextInt(6), d = 7 + RNG.nextInt(6), y0 = -50 + RNG.nextInt(30);
+        Block wall = BURIED_WALLS[RNG.nextInt(BURIED_WALLS.length)];
+        hide(x0, z0, w, d);                                  // hidden before the first block exists
+        buried(l, x0, z0, w, d, y0, wall, 4 + RNG.nextInt(7));
+        log("Buried:  x " + x0 + " z " + z0 + " y " + y0);
+    }
+
+    // =====================================================================
+    // Gear
+    // =====================================================================
     public static String gear() {
         MinecraftServer server = Minecraft.getInstance().getSingleplayerServer();
         if (server == null) return "Singleplayer only.";
         server.execute(() -> {
-            for (ServerPlayer p : server.getPlayerList().getPlayers()) {
-                p.getInventory().add(new ItemStack(Items.ELYTRA));
-                p.getInventory().add(new ItemStack(Items.FIREWORK_ROCKET, 64));
-            }
+            var reg = server.registryAccess().lookupOrThrow(Registries.ENCHANTMENT);
+            for (ServerPlayer p : server.getPlayerList().getPlayers()) giveGear(p, reg);
         });
-        return "Gave elytra + 64 rockets. Equip the elytra.";
+        return "Gave raid gear (elytra is on, chestplate is in your inventory).";
     }
 
+    private static void ench(ItemStack s, HolderLookup.RegistryLookup<Enchantment> reg, ResourceKey<Enchantment> key, int lvl) {
+        s.enchant(reg.getOrThrow(key), lvl);
+    }
+
+    private static ItemStack armor(Item item, HolderLookup.RegistryLookup<Enchantment> reg) {
+        ItemStack s = new ItemStack(item);
+        ench(s, reg, Enchantments.BLAST_PROTECTION, 4);
+        ench(s, reg, Enchantments.UNBREAKING, 3);
+        ench(s, reg, Enchantments.MENDING, 1);
+        return s;
+    }
+
+    private static void give(ServerPlayer p, ItemStack s) {
+        if (!p.getInventory().add(s)) p.drop(s, false);
+    }
+
+    private static void giveGear(ServerPlayer p, HolderLookup.RegistryLookup<Enchantment> reg) {
+        p.setItemSlot(EquipmentSlot.HEAD, armor(Items.NETHERITE_HELMET, reg));
+        p.setItemSlot(EquipmentSlot.LEGS, armor(Items.NETHERITE_LEGGINGS, reg));
+        p.setItemSlot(EquipmentSlot.FEET, armor(Items.NETHERITE_BOOTS, reg));
+
+        ItemStack elytra = new ItemStack(Items.ELYTRA);
+        ench(elytra, reg, Enchantments.UNBREAKING, 3);
+        ench(elytra, reg, Enchantments.MENDING, 1);
+        p.setItemSlot(EquipmentSlot.CHEST, elytra);
+        give(p, armor(Items.NETHERITE_CHESTPLATE, reg));
+
+        // Drill: a heavily enchanted netherite pickaxe with a custom name.
+        ItemStack drill = new ItemStack(Items.NETHERITE_PICKAXE);
+        ench(drill, reg, Enchantments.EFFICIENCY, 10);
+        ench(drill, reg, Enchantments.UNBREAKING, 5);
+        ench(drill, reg, Enchantments.FORTUNE, 3);
+        ench(drill, reg, Enchantments.MENDING, 1);
+        drill.set(DataComponents.CUSTOM_NAME,
+                Component.literal("Amethyst Drill").withStyle(Style.EMPTY.withColor(ChatFormatting.LIGHT_PURPLE).withItalic(false)));
+        give(p, drill);
+
+        p.setItemSlot(EquipmentSlot.OFFHAND, new ItemStack(Items.TOTEM_OF_UNDYING));
+        for (int i = 0; i < 5; i++) give(p, new ItemStack(Items.TOTEM_OF_UNDYING));
+        give(p, new ItemStack(Items.END_CRYSTAL, 64));
+        give(p, new ItemStack(Items.END_CRYSTAL, 64));
+        give(p, new ItemStack(Items.OBSIDIAN, 64));
+        give(p, new ItemStack(Items.OBSIDIAN, 64));
+        give(p, new ItemStack(Items.OBSIDIAN, 64));
+        give(p, new ItemStack(Items.GOLDEN_APPLE, 32));
+        give(p, new ItemStack(Items.ENDER_PEARL, 16));
+        give(p, new ItemStack(Items.COOKED_BEEF, 64));
+        give(p, new ItemStack(Items.FIREWORK_ROCKET, 64));
+    }
+
+    // =====================================================================
+    // Building
+    // =====================================================================
     private static void set(ServerLevel l, int x, int y, int z, Block b) {
         l.setBlock(new BlockPos(x, y, z), b.defaultBlockState(), 2); // flag 2: no neighbour updates
     }
 
-    private static void house(ServerLevel l, int x0, int z0, int extraChests) {
-        int y = l.getHeight(Heightmap.Types.WORLD_SURFACE, x0 + 4, z0 + 4);
-        for (int dx = 0; dx < 9; dx++)
-            for (int dz = 0; dz < 9; dz++) {
-                set(l, x0 + dx, y - 1, z0 + dz, Blocks.OAK_PLANKS);
-                boolean edge = dx == 0 || dx == 8 || dz == 0 || dz == 8;
+    private static void house(ServerLevel l, int x0, int y, int z0, int w, int d, Block wall, int chests) {
+        for (int dx = 0; dx < w; dx++)
+            for (int dz = 0; dz < d; dz++) {
+                set(l, x0 + dx, y - 1, z0 + dz, wall);
+                for (int fy = 2; fy <= 5; fy++) {            // foundation so it does not hover on slopes
+                    BlockPos fp = new BlockPos(x0 + dx, y - fy, z0 + dz);
+                    if (l.getBlockState(fp).isAir()) l.setBlock(fp, Blocks.COBBLESTONE.defaultBlockState(), 2);
+                }
+                boolean edge = dx == 0 || dx == w - 1 || dz == 0 || dz == d - 1;
                 for (int dy = 0; dy <= 4; dy++) {
-                    Block b = dy == 4 ? Blocks.OAK_PLANKS : (edge ? Blocks.OAK_PLANKS : Blocks.AIR);
+                    Block b = dy == 4 ? wall : (edge ? wall : Blocks.AIR);
                     set(l, x0 + dx, y + dy, z0 + dz, b);
                 }
             }
-        set(l, x0 + 4, y, z0, Blocks.AIR);
-        set(l, x0 + 4, y + 1, z0, Blocks.AIR);
-        storage(l, x0, y, z0, 6 + extraChests);
+        set(l, x0 + w / 2, y, z0, Blocks.AIR);
+        set(l, x0 + w / 2, y + 1, z0, Blocks.AIR);
+        storage(l, x0, y, z0, w, d, chests);
     }
 
-    private static void buried(ServerLevel l, int x0, int z0, boolean decoy) {
-        int y0 = -30;
-        for (int dx = 0; dx < 9; dx++)
-            for (int dz = 0; dz < 9; dz++)
+    private static void buried(ServerLevel l, int x0, int z0, int w, int d, int y0, Block wall, int chests) {
+        for (int dx = 0; dx < w; dx++)
+            for (int dz = 0; dz < d; dz++)
                 for (int dy = 0; dy < 5; dy++) {
-                    boolean shell = dx == 0 || dx == 8 || dz == 0 || dz == 8 || dy == 0 || dy == 4;
-                    set(l, x0 + dx, y0 + dy, z0 + dz, shell ? Blocks.OAK_PLANKS : Blocks.AIR);
+                    boolean shell = dx == 0 || dx == w - 1 || dz == 0 || dz == d - 1 || dy == 0 || dy == 4;
+                    set(l, x0 + dx, y0 + dy, z0 + dz, shell ? wall : Blocks.AIR);
                 }
-        storage(l, x0, y0 + 1, z0, 6);
-        if (decoy) set(l, x0 + 4, y0 + 1, z0 + 4, Blocks.BELL);
+        storage(l, x0, y0 + 1, z0, w, d, chests);
     }
 
-    private static void storage(ServerLevel l, int x0, int y, int z0, int chests) {
-        for (int i = 0; i < Math.min(chests, 7); i++) set(l, x0 + 1 + i, y, z0 + 1, Blocks.CHEST);
-        set(l, x0 + 1, y, z0 + 7, Blocks.BARREL);
-        set(l, x0 + 2, y, z0 + 7, Blocks.BARREL);
-        set(l, x0 + 4, y, z0 + 7, Blocks.SHULKER_BOX);
-        set(l, x0 + 5, y, z0 + 7, Blocks.SHULKER_BOX);
-        set(l, x0 + 6, y, z0 + 7, Blocks.ENDER_CHEST);
-        set(l, x0 + 7, y, z0 + 7, Blocks.FURNACE);
-        set(l, x0 + 7, y, z0 + 1, Blocks.CRAFTING_TABLE);
+    private static void storage(ServerLevel l, int x0, int y, int z0, int w, int d, int chests) {
+        int inner = w - 2;
+        for (int i = 0; i < Math.min(chests, inner * 2); i++) {
+            BlockPos pos = new BlockPos(x0 + 1 + i % inner, y, z0 + 1 + i / inner);
+            l.setBlock(pos, Blocks.CHEST.defaultBlockState(), 2);
+            fill(l, pos);
+        }
+        Block[] back = {Blocks.BARREL, Blocks.BARREL, Blocks.SHULKER_BOX, Blocks.SHULKER_BOX, Blocks.ENDER_CHEST,
+                Blocks.FURNACE, Blocks.CRAFTING_TABLE, Blocks.BARREL, Blocks.SHULKER_BOX};
+        for (int i = 0; i < inner; i++) {
+            BlockPos pos = new BlockPos(x0 + 1 + i, y, z0 + d - 2);
+            Block b = back[i % back.length];
+            l.setBlock(pos, b.defaultBlockState(), 2);
+            if (b == Blocks.BARREL || b == Blocks.SHULKER_BOX) fill(l, pos);
+        }
+        set(l, x0 + 1, y, z0 + d - 3, Blocks.TORCH);
+        set(l, x0 + w - 2, y, z0 + d - 3, Blocks.TORCH);
+    }
+
+    /** Puts some base-looking loot into a container. */
+    private static void fill(ServerLevel l, BlockPos pos) {
+        if (!(l.getBlockEntity(pos) instanceof Container c)) return;
+        int n = 3 + RNG.nextInt(10);
+        for (int i = 0; i < n; i++) c.setItem(RNG.nextInt(c.getContainerSize()), loot());
+    }
+
+    private static ItemStack loot() {
+        return switch (RNG.nextInt(14)) {
+            case 0 -> new ItemStack(Items.DIAMOND, 1 + RNG.nextInt(16));
+            case 1 -> new ItemStack(Items.NETHERITE_INGOT, 1 + RNG.nextInt(4));
+            case 2 -> new ItemStack(Items.TOTEM_OF_UNDYING);
+            case 3 -> new ItemStack(Items.ENCHANTED_GOLDEN_APPLE, 1 + RNG.nextInt(3));
+            case 4 -> new ItemStack(Items.END_CRYSTAL, 4 + RNG.nextInt(13));
+            case 5 -> new ItemStack(Items.OBSIDIAN, 16 + RNG.nextInt(49));
+            case 6 -> new ItemStack(Items.ANCIENT_DEBRIS, 2 + RNG.nextInt(7));
+            case 7 -> new ItemStack(Items.DIAMOND_BLOCK, 1 + RNG.nextInt(5));
+            case 8 -> new ItemStack(Items.GOLD_BLOCK, 1 + RNG.nextInt(8));
+            case 9 -> new ItemStack(Items.EXPERIENCE_BOTTLE, 16 + RNG.nextInt(49));
+            case 10 -> new ItemStack(Items.ELYTRA);
+            case 11 -> new ItemStack(Items.FIREWORK_ROCKET, 16 + RNG.nextInt(49));
+            case 12 -> new ItemStack(Items.ENDER_PEARL, 4 + RNG.nextInt(13));
+            default -> new ItemStack(Items.COOKED_BEEF, 16 + RNG.nextInt(49));
+        };
     }
 
     // =====================================================================
     // Schematic loader: .schem (Sponge v2/v3), .litematic, vanilla .nbt
+    // (optional: files in siren-schematics/ are used for some buried bases)
     // =====================================================================
+
     private record Part(int ox, int oy, int oz, int sx, int sy, int sz, BlockState[] palette, int[] idx) {}
 
     private record Schem(List<Part> parts, int w, int h, int l) {}
@@ -179,69 +431,41 @@ public final class TestBases {
         return dir;
     }
 
-    public static String loadSchematics(int count) {
-        Minecraft mc = Minecraft.getInstance();
-        MinecraftServer server = mc.getSingleplayerServer();
-        if (server == null) return "Singleplayer only.";
-        if (mc.player == null || mc.level == null || mc.level.dimension() != Level.OVERWORLD)
-            return "Be in the overworld first.";
-
-        Path dir = folder();
-        List<Path> files;
-        try (Stream<Path> s = Files.list(dir)) {
-            files = s.filter(p -> {
+    private static List<Path> schematicFiles() {
+        try (Stream<Path> s = Files.list(folder())) {
+            return s.filter(p -> {
                 String n = p.getFileName().toString().toLowerCase();
                 return n.endsWith(".schem") || n.endsWith(".litematic") || n.endsWith(".nbt");
-            }).sorted().toList();
+            }).toList();
         } catch (IOException e) {
-            return "Could not read folder: " + e.getMessage();
+            return List.of();
         }
-        schemInfo.clear();
-        if (files.isEmpty())
-            return "No files. Put .schem / .litematic / .nbt in siren-schematics/ (folder is ready).";
-        List<Path> shuffled = new ArrayList<>(files);
-        Collections.shuffle(shuffled); // random picks each time
+    }
 
-        int px = mc.player.getBlockX(), pz = mc.player.getBlockZ();
-        int x = px + 160, z = pz, rowDepth = 0, inRow = 0, queued = 0;
-        ServerLevel level = server.overworld();
-        for (Path f : shuffled) {
-            if (queued >= count) break;
-            String name = f.getFileName().toString();
-            String shortName = name.length() > 22 ? name.substring(0, 21) + "~" : name;
+    /** Loads a schematic off-thread, then places it a little each server tick, buried and hidden from the ESP. */
+    private static void queueSchematic(Path f, ServerLevel level, int x, int z) {
+        Thread t = new Thread(() -> {
             Schem sc;
             try {
                 unknown = 0;
                 sc = load(f);
             } catch (Exception e) {
-                schemInfo.add(shortName + ": failed (" + e.getMessage() + ")");
-                continue;
+                return;
             }
-            if (sc.h() > 110) { schemInfo.add(shortName + ": too tall to bury (" + sc.h() + ")"); continue; }
+            if (sc.h() > 110) return;
             int by = Math.max(FLOOR_Y, TOP_Y - sc.h() + 1);
-            if (inRow >= 4) { x = px + 160; z += rowDepth + 64; rowDepth = 0; inRow = 0; }
-            schemInfo.add(shortName + ": x " + x + " z " + z + " y " + by + (unknown > 0 ? " (" + unknown + " unknown)" : ""));
-            jobs.add(new Job(level, name, sc.parts(), x, by, z));
-            x += sc.w() + 64;
-            rowDepth = Math.max(rowDepth, sc.l());
-            inRow++;
-            queued++;
-        }
-        schemInfo.add(0, "Random picks: " + queued + " of " + files.size() + " files");
-        if (!hooked) { ServerTickEvents.END_SERVER_TICK.register(TestBases::tick); hooked = true; }
-        return queued + " random schematic(s) queued, placed a little each tick.";
+            hide(x, z, sc.w(), sc.l());
+            log("Buried:  x " + x + " z " + z + " y " + by);
+            jobs.add(new Job(level, f.getFileName().toString(), sc.parts(), x, by, z));
+        }, "siren-larp-load");
+        t.setDaemon(true);
+        t.start();
     }
 
     private static void tick(MinecraftServer server) {
         Job j = jobs.peek();
         if (j == null) return;
-        if (j.step(BLOCKS_PER_TICK)) {
-            jobs.poll();
-            Minecraft mc = Minecraft.getInstance();
-            mc.execute(() -> {
-                if (mc.player != null) mc.player.displayClientMessage(Component.literal("[Siren] Placed " + j.name), false);
-            });
-        }
+        if (j.step(BLOCKS_PER_TICK)) jobs.poll();   // no chat message: it would give the larp away
     }
 
     private static Schem load(Path file) throws IOException {

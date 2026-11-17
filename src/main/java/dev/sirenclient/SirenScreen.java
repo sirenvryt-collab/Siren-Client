@@ -24,7 +24,7 @@ import java.util.function.IntConsumer;
 public class SirenScreen extends Screen {
     private static final int W = 440, H = 280;
     private static final int ACCENT = 0xFF2EE6A6, WHITE = 0xFFFFFFFF, GRAY = 0xFF8899AA, DIM = 0xFF5C6B78;
-    private static final String[] TABS = {"Modules", "Blocks", "Results", "Waypoints", "Scan", "Visuals", "Larp"};
+    private static final String[] TABS = {"Modules", "Blocks", "Results", "Waypoints", "Scan", "Visuals", "Larp", "Fake"};
     private static final String[] LISTS = {"base", "sus", "esp"};
 
     private static int tab = 0, page = 0, weight = 2, colorIdx = 0;
@@ -67,6 +67,7 @@ public class SirenScreen extends Screen {
             case 3 -> waypointsTab();
             case 4 -> scanTab();
             case 5 -> visualsTab();
+            case 7 -> fakeTab();
             default -> larpTab();
         }
     }
@@ -264,7 +265,7 @@ public class SirenScreen extends Screen {
         y += 24;
         slider(y, "Sus burial depth", 2, 32, 1, Config.susDepth, v -> Config.susDepth = v);
         y += 24;
-        toggleRow(y, "Chat ping on strong finds", Config.notify, () -> Config.notify = !Config.notify);
+        toggleRow(y, "Pop-up on strong finds", Config.notify, () -> Config.notify = !Config.notify);
         y += 32;
         for (String s : new String[]{
                 "SusChunks counts only blocks buried at least 'depth' blocks below the",
@@ -333,6 +334,26 @@ public class SirenScreen extends Screen {
             y += 11;
         }
         if (!status.isEmpty()) labels.add(new Label(status, cx, y0 + H - 30, ACCENT));
+    }
+
+    // ---------- tab: fake client cosmetics ----------
+    private void fakeTab() {
+        int y = cy;
+        toggleRow(y, "Fake tab list + ping", FakeHud.tabList, () -> FakeHud.tabList = !FakeHud.tabList);
+        y += 24;
+        toggleRow(y, "Module list (top right)", FakeHud.moduleList, () -> FakeHud.moduleList = !FakeHud.moduleList);
+        y += 24;
+        toggleRow(y, "ESP text labels", FakeHud.espLabels, () -> FakeHud.espLabels = !FakeHud.espLabels);
+        y += 24;
+        toggleRow(y, "Fake scoreboard", FakeHud.scoreboard, () -> FakeHud.scoreboard = !FakeHud.scoreboard);
+        y += 24;
+        toggleRow(y, "Rubberband when you dig down", FakeHud.rubberband, () -> FakeHud.rubberband = !FakeHud.rubberband);
+        y += 24;
+        toggleRow(y, "Lag spike on relog", FakeHud.lagSpike, () -> FakeHud.lagSpike = !FakeHud.lagSpike);
+        y += 30;
+        labels.add(new Label("These only show while Larp mode is on (the find pop-up always works).", cx, y, GRAY));
+        y += 11;
+        labels.add(new Label("Hold the tab-list key (Tab) to see the fake player list.", cx, y, GRAY));
     }
 
     private void toggleRow(int y, String text, boolean on, Runnable flip) {

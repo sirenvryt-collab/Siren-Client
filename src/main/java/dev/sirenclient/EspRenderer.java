@@ -80,9 +80,9 @@ public final class EspRenderer {
         float fill = Config.espAlpha / 100f * 0.35f;
 
         if (m.base.isEnabled())
-            for (Hit h : m.base.values()) addHit(out, tr, h, Config.COLORS[Config.baseColorIdx], fill, px, pz, max2);
+            for (Hit h : m.base.values()) addHit(out, tr, h, "Base", Config.COLORS[Config.baseColorIdx], fill, px, pz, max2);
         if (m.sus.isEnabled())
-            for (Hit h : m.sus.values()) addHit(out, tr, h, Config.COLORS[Config.susColorIdx], fill, px, pz, max2);
+            for (Hit h : m.sus.values()) addHit(out, tr, h, "Sus", Config.COLORS[Config.susColorIdx], fill, px, pz, max2);
 
         if (m.newChunks.isEnabled()) {
             double y = py - 1.5;
@@ -147,6 +147,7 @@ public final class EspRenderer {
         for (int[] d : TestBases.digSpots()) {
             out.add(box(d[0], -64, d[1], d[0] + 1, 320, d[1] + 1, 0xFFE23B, 0.5f, 1f, true));
             if (n++ < 4) tracer(tr, d[0] + 0.5, py, d[1] + 0.5, 0xFFE23B);
+            FakeHud.addLabel(d[0] + 0.5, py + 3, d[1] + 0.5, "Dig here");
         }
     }
 
@@ -155,7 +156,7 @@ public final class EspRenderer {
         tr.add(new Tracer(x, y, z, ((rgb >> 16) & 255) / 255f, ((rgb >> 8) & 255) / 255f, (rgb & 255) / 255f));
     }
 
-    private static void addHit(List<Box> out, List<Tracer> tr, Hit h, int rgb, float fill, double px, double pz, double max2) {
+    private static void addHit(List<Box> out, List<Tracer> tr, Hit h, String tag, int rgb, float fill, double px, double pz, double max2) {
         if (out.size() >= MAX_BOXES - 3) return;
         double dx = h.x() + 0.5 - px, dz = h.z() + 0.5 - pz;
         if (dx * dx + dz * dz > max2) return;
@@ -167,6 +168,7 @@ public final class EspRenderer {
             out.add(box(ox, h.y(), oz, ox + 16, h.y() + 0.1, oz + 16, rgb, fill * 0.7f, 0.6f, true));
         }
         tracer(tr, h.x() + 0.5, h.y() + 0.5, h.z() + 0.5, rgb);
+        FakeHud.addLabel(h.x() + 0.5, h.y() + 1.6, h.z() + 0.5, tag + " " + h.score());
     }
 
     private static Box box(double x1, double y1, double z1, double x2, double y2, double z2,
@@ -177,6 +179,7 @@ public final class EspRenderer {
 
     // ---- drawing ----
     private static void onRender(WorldRenderContext context) {
+        FakeHud.labels.clear();
         ModuleManager m = SirenClient.modules;
         if (m == null || !(m.base.isEnabled() || m.sus.isEnabled() || m.newChunks.isEnabled() || m.blockEsp.isEnabled()
                 || m.playerEsp.isEnabled() || !Config.waypoints.isEmpty() || !TestBases.digSpots().isEmpty())) return;

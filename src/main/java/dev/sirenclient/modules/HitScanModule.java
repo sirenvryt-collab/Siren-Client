@@ -23,7 +23,7 @@ public abstract class HitScanModule extends ChunkScanModule<Hit> {
 
     private long lastNotify = -1000;
 
-    /** Chat ping for strong new finds (score >= 2x the minimum), at most one per second. */
+    /** Pop-up (no chat message) for strong new finds (score >= 2x the minimum), at most one per second. */
     @Override
     protected void onFound(Hit h) {
         Minecraft mc = Minecraft.getInstance();
@@ -31,8 +31,8 @@ public abstract class HitScanModule extends ChunkScanModule<Hit> {
         long now = mc.level.getGameTime();
         if (now - lastNotify < 20) return;
         lastNotify = now;
-        mc.player.displayClientMessage(Component.literal("[Siren] " + name + ": " + h.score()
-                + " pts at " + h.x() + " " + h.y() + " " + h.z()).withStyle(ChatFormatting.GREEN), false);
+        double dx = h.x() - mc.player.getX(), dz = h.z() - mc.player.getZ();
+        dev.sirenclient.FakeHud.toast(name + " hit", h.score() + " pts, " + (int) Math.sqrt(dx * dx + dz * dz) + "m away");
     }
 
     @Override protected boolean keep(Hit h) {

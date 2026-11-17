@@ -59,7 +59,7 @@ import java.util.zip.GZIPInputStream;
 public final class TestBases {
     public static final List<String> info = new CopyOnWriteArrayList<>();   // recent spawns, shown in the menu
     /** Average seconds of gliding between bases (each gap is randomised +-40%). Set from the menu slider. */
-    public static int avgSeconds = 150;
+    public static int avgSeconds = 90;
 
     private static final Random RNG = new Random();
     private static final ConcurrentLinkedQueue<Job> jobs = new ConcurrentLinkedQueue<>();
@@ -82,11 +82,12 @@ public final class TestBases {
     private static Object armedLevel = null;
 
     // bonus base after a dig-down relog: sometimes (not every time) one appears a few seconds of flight away
-    private static final double NEAR_CHANCE = 0.35;
+    private static final double NEAR_CHANCE = 0.5;     // after one miss the next qualifying relog is guaranteed
     private static final long NEAR_COOLDOWN_MS = 4 * 60_000L;   // only starts once you actually FIND a bonus base
     private static final int FOUND_RADIUS = 40;                    // blocks (horizontal) that count as "found"
     private static final int ABANDON_RADIUS = 300;                 // fly this far from an unfound one and it is dropped
     private static long lastFoundAt = 0;
+    private static int nearMisses = 0;
     private static volatile boolean nearPending = false;           // a bonus base is out there and not found yet
     private static volatile int nearX = 0, nearZ = 0;
     private static volatile int placedX = 0, placedZ = 0;          // centre of the last surface base placed
@@ -128,7 +129,7 @@ public final class TestBases {
         if (on) {
             ensureHooks();
             flightTicks = 0;
-            nextAt = rollInterval();
+            nextAt = 400 + RNG.nextInt(500);   // first base after 20-45 s of gliding
         }
         return on ? "Larp on. Glide around and bases will appear ahead." : "Larp off.";
     }
@@ -163,6 +164,7 @@ public final class TestBases {
             armedLevel = null;
             nearWait = -1;
             lastFoundAt = 0;
+            nearMisses = 0;
             nearPending = false;
             flightTicks = 0;
             nextAt = rollInterval();
@@ -202,8 +204,11 @@ public final class TestBases {
             minedDown = false;
             armedLevel = null;
             long now = System.currentTimeMillis();
-            if (larp && !nearPending && now - lastFoundAt > NEAR_COOLDOWN_MS && RNG.nextDouble() < NEAR_CHANCE) {
-                nearWait = 60 + RNG.nextInt(80);  // 3-7 s after the relog, once the chunks around you have loaded
+            if (larp && !nearPending && now - lastFoundAt > NEAR_COOLDOWN_MS) {
+                if (nearMisses >= 1 || RNG.nextDouble() < NEAR_CHANCE) {
+                    nearMisses = 0;
+                    nearWait = 60 + RNG.nextInt(80);  // 3-7 s after the relog, once the chunks around you have loaded
+                } else nearMisses++;
             }
             if (!hidden.isEmpty()) {
                 revealQueue.clear();
@@ -331,15 +336,17 @@ public final class TestBases {
         double base = (look.x * look.x + look.z * look.z) > 0.01 ? Math.atan2(look.z, look.x) : RNG.nextDouble() * Math.PI * 2;
         ServerLevel level = server.overworld();
         server.execute(() -> {
-            for (int attempt = 0; attempt < 6; attempt++) {
+            for (int attempt = 0; attempt < 10; attempt++) {
                 double ang = base + Math.toRadians(RNG.nextInt(121) - 60) + (attempt > 2 ? Math.PI * RNG.nextDouble() * 2 : 0);
                 double dist = 70 + RNG.nextInt(51);
                 int x = (int) Math.floor(px + Math.cos(ang) * dist), z = (int) Math.floor(pz + Math.sin(ang) * dist);
                 if (placeSurface(level, x, z)) {   // visible straight away, no hiding
                     nearX = placedX; nearZ = placedZ; nearPending = true;
+                    log("Bonus base: x " + placedX + " z " + placedZ + " (" + (int) Math.hypot(placedX - px, placedZ - pz) + "m)");
                     return;
                 }
             }
+            log("Bonus base: found no flat land nearby, it will roll again on your next relog");
         });
     }
 
@@ -463,6 +470,28 @@ public final class TestBases {
         return s;
     }
 
+    /** Fake shop: everything is free. Singleplayer only. count is clamped to one full stack. */
+    public static String shopGive(Item item, int count) {
+        MinecraftServer server = Minecraft.getInstance().getSingleplayerServer();
+        if (server == null) return "Singleplayer only.";
+        int n = Math.max(1, Math.min(count, new ItemStack(item).getMaxStackSize()));
+        server.execute(() -> {
+            for (ServerPlayer p : server.getPlayerList().getPlayers()) give(p, new ItemStack(item, n));
+        });
+        return "Bought " + n + "x " + new ItemStack(item).getHoverName().getString() + "  ($0.00)";
+    }
+
+    public static String shopPick() {
+        MinecraftServer server = Minecraft.getInstance().getSingleplayerServer();
+        if (server == null) return "Singleplayer only.";
+        ensurePickHook();
+        server.execute(() -> {
+            var reg = server.registryAccess().lookupOrThrow(Registries.ENCHANTMENT);
+            for (ServerPlayer p : server.getPlayerList().getPlayers()) give(p, makePick(reg));
+        });
+        return "Bought 1x Amethyst Pickaxe  ($0.00)";
+    }
+
     private static void give(ServerPlayer p, ItemStack s) {
         if (!p.getInventory().add(s)) p.drop(s, false);
     }
@@ -478,18 +507,7 @@ public final class TestBases {
         p.setItemSlot(EquipmentSlot.CHEST, elytra);
         give(p, armor(Items.NETHERITE_CHESTPLATE, reg));
 
-        // Amethyst Pickaxe: DonutSMP-style netherite pickaxe that mines a 3x3.
-        ItemStack drill = new ItemStack(Items.NETHERITE_PICKAXE);
-        ench(drill, reg, Enchantments.EFFICIENCY, 5);   // a bit slower than before (was 10)
-        ench(drill, reg, Enchantments.UNBREAKING, 5);
-        ench(drill, reg, Enchantments.FORTUNE, 3);
-        ench(drill, reg, Enchantments.MENDING, 1);
-        drill.set(DataComponents.CUSTOM_NAME,
-                Component.literal(PICK_NAME).withStyle(Style.EMPTY.withColor(ChatFormatting.AQUA).withItalic(false)));
-        drill.set(DataComponents.LORE, new ItemLore(List.of(
-                Component.literal("A powerful pickaxe crafted from amethyst").withStyle(Style.EMPTY.withColor(ChatFormatting.LIGHT_PURPLE).withItalic(false)),
-                Component.literal("that mines in a 3x3 area!").withStyle(Style.EMPTY.withColor(ChatFormatting.LIGHT_PURPLE).withItalic(false)))));
-        give(p, drill);
+        give(p, makePick(reg));
 
         p.setItemSlot(EquipmentSlot.OFFHAND, new ItemStack(Items.TOTEM_OF_UNDYING));
         for (int i = 0; i < 5; i++) give(p, new ItemStack(Items.TOTEM_OF_UNDYING));
@@ -502,6 +520,21 @@ public final class TestBases {
         give(p, new ItemStack(Items.ENDER_PEARL, 16));
         give(p, new ItemStack(Items.COOKED_BEEF, 64));
         give(p, new ItemStack(Items.FIREWORK_ROCKET, 64));
+    }
+
+    /** Amethyst Pickaxe: DonutSMP-style netherite pickaxe that mines a vertical 3x3. */
+    private static ItemStack makePick(HolderLookup.RegistryLookup<Enchantment> reg) {
+        ItemStack drill = new ItemStack(Items.NETHERITE_PICKAXE);
+        ench(drill, reg, Enchantments.EFFICIENCY, 5);   // a bit slower than before (was 10)
+        ench(drill, reg, Enchantments.UNBREAKING, 5);
+        ench(drill, reg, Enchantments.FORTUNE, 3);
+        ench(drill, reg, Enchantments.MENDING, 1);
+        drill.set(DataComponents.CUSTOM_NAME,
+                Component.literal(PICK_NAME).withStyle(Style.EMPTY.withColor(ChatFormatting.AQUA).withItalic(false)));
+        drill.set(DataComponents.LORE, new ItemLore(List.of(
+                Component.literal("A powerful pickaxe crafted from amethyst").withStyle(Style.EMPTY.withColor(ChatFormatting.LIGHT_PURPLE).withItalic(false)),
+                Component.literal("that mines in a 3x3 area!").withStyle(Style.EMPTY.withColor(ChatFormatting.LIGHT_PURPLE).withItalic(false)))));
+        return drill;
     }
 
     // =====================================================================

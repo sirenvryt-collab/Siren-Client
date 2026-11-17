@@ -1,6 +1,7 @@
 package dev.sirenclient.modules;
 
 import dev.sirenclient.Config;
+import dev.sirenclient.TestBases;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
@@ -34,7 +35,9 @@ public abstract class HitScanModule extends ChunkScanModule<Hit> {
                 + " pts at " + h.x() + " " + h.y() + " " + h.z()).withStyle(ChatFormatting.GREEN), false);
     }
 
-    @Override protected boolean keep(Hit h) { return h.score() >= minScore(); }
+    @Override protected boolean keep(Hit h) {
+        return h.score() >= minScore() && !TestBases.isHidden(h.x() >> 4, h.z() >> 4); // larp: hidden until relog
+    }
 
     public List<Hit> ranked(int n) {
         List<Hit> list = new ArrayList<>(results.values());

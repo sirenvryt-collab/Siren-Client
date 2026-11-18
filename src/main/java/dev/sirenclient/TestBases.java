@@ -315,38 +315,30 @@ public final class TestBases {
         double roll = forceSpawners ? 0 : RNG.nextDouble();
         if (roll < 0.01) {                                   // spawner cages near bedrock: hidden until dig down + relog
             server.execute(() -> placeSpawners(level, x, z));
-        } else if (roll < 0.41) {                            // buried: hidden until mine down + relog
-            List<Path> files = schematicFiles();
-            if (!files.isEmpty() && RNG.nextDouble() < 0.6) {
-                queueSchematic(files.get(RNG.nextInt(files.size())), level, x, z);
-                return;
-            }
-            server.execute(() -> placeBuried(level, x, z));
-        } else {                                             // surface: shows once its chunks load
-            server.execute(() -> { if (!placeSurface(level, x, z)) placeBuried(level, x, z); });
+            return;
         }
+        List<Path> files = schematicFiles();                 // only your schematics are used, no generated houses
+        if (files.isEmpty()) { log("No schematics in siren-schematics/ - add some to get bases"); return; }
+        boolean hideIt = roll < 0.41;                        // 40%: hidden until you mine below Y 0 and relog
+        queueSchematic(files, level, x, z, hideIt, null);
     }
 
     /** Bonus base after a relog: a visible surface base 70-120 blocks away, about 1-3 s of elytra flight. */
     private static void spawnNear(Minecraft mc, MinecraftServer server) {
         if (!larp || mc.player == null || mc.level == null || mc.level.dimension() != Level.OVERWORLD) return;
+        List<Path> files = schematicFiles();
+        if (files.isEmpty()) { log("Bonus base: no schematics in siren-schematics/"); return; }
         var p = mc.player;
         double px = p.getX(), pz = p.getZ();
         Vec3 look = p.getLookAngle();
         double base = (look.x * look.x + look.z * look.z) > 0.01 ? Math.atan2(look.z, look.x) : RNG.nextDouble() * Math.PI * 2;
-        ServerLevel level = server.overworld();
-        server.execute(() -> {
-            for (int attempt = 0; attempt < 10; attempt++) {
-                double ang = base + Math.toRadians(RNG.nextInt(121) - 60) + (attempt > 2 ? Math.PI * RNG.nextDouble() * 2 : 0);
-                double dist = 70 + RNG.nextInt(51);
-                int x = (int) Math.floor(px + Math.cos(ang) * dist), z = (int) Math.floor(pz + Math.sin(ang) * dist);
-                if (placeSurface(level, x, z)) {   // visible straight away, no hiding
-                    nearX = placedX; nearZ = placedZ; nearPending = true;
-                    log("Bonus base: x " + placedX + " z " + placedZ + " (" + (int) Math.hypot(placedX - px, placedZ - pz) + "m)");
-                    return;
-                }
-            }
-            log("Bonus base: found no flat land nearby, it will roll again on your next relog");
+        double ang = base + Math.toRadians(RNG.nextInt(121) - 60);
+        double dist = 70 + RNG.nextInt(51);
+        int x = (int) Math.floor(px + Math.cos(ang) * dist), z = (int) Math.floor(pz + Math.sin(ang) * dist);
+        // A schematic base placed underground and NOT hidden: your ESP / tracers show it straight away.
+        queueSchematic(files, server.overworld(), x, z, false, c -> {
+            nearX = c[0]; nearZ = c[1]; nearPending = true;
+            log("Bonus base: x " + c[0] + " z " + c[1] + " (" + (int) Math.hypot(c[0] - px, c[1] - pz) + "m)");
         });
     }
 
@@ -704,24 +696,104 @@ public final class TestBases {
         }
     }
 
-    /** Loads a schematic off-thread, then places it a little each server tick, buried and hidden from the ESP. */
-    private static void queueSchematic(Path f, ServerLevel level, int x, int z) {
+    /** Loads a schematic off-thread, then places it a little each server tick, underground. */
+    private static void queueSchematic(List<Path> files, ServerLevel level, int x, int z, boolean hideIt,
+                                       java.util.function.Consumer<int[]> done) {
+        List<Path> order = new ArrayList<>(files);
+        Collections.shuffle(order, RNG);
         Thread t = new Thread(() -> {
-            Schem sc;
-            try {
-                unknown = 0;
-                sc = load(f);
-            } catch (Exception e) {
+            for (int a = 0; a < Math.min(4, order.size()); a++) {
+                Path f = order.get(a);
+                Schem sc;
+                try {
+                    unknown = 0;
+                    sc = load(f);
+                } catch (Exception e) {
+                    continue;
+                }
+                if (sc.h() > 110) continue;
+                sc = sprinkle(sc);
+                int by = Math.max(FLOOR_Y, TOP_Y - sc.h() + 1);
+                if (hideIt) hide(x, z, sc.w(), sc.l());
+                log((hideIt ? "Buried:  x " : "Base:    x ") + x + " z " + z + " y " + by);
+                jobs.add(new Job(level, f.getFileName().toString(), sc.parts(), x, by, z));
+                if (done != null) done.accept(new int[]{x + sc.w() / 2, z + sc.l() / 2});
                 return;
             }
-            if (sc.h() > 110) return;
-            int by = Math.max(FLOOR_Y, TOP_Y - sc.h() + 1);
-            hide(x, z, sc.w(), sc.l());
-            log("Buried:  x " + x + " z " + z + " y " + by);
-            jobs.add(new Job(level, f.getFileName().toString(), sc.parts(), x, by, z));
+            log("Could not load a schematic from siren-schematics/");
         }, "siren-larp-load");
         t.setDaemon(true);
         t.start();
+    }
+
+    /**
+     * Makes sure a schematic can be detected: if it has too few blocks from your ESP list (or too low a
+     * BaseFinder score), random chests / ESP blocks are dropped onto floors inside it.
+     */
+    private static Schem sprinkle(Schem sc) {
+        try {
+            Map<Block, Integer> esp = new HashMap<>(Config.lists.get("esp"));
+            Map<Block, Integer> baseW = new HashMap<>(Config.lists.get("base"));
+            int espCount = 0, score = 0;
+            for (Part p : sc.parts()) {
+                int n = p.palette().length;
+                boolean[] isEsp = new boolean[n];
+                int[] wt = new int[n];
+                for (int i = 0; i < n; i++) {
+                    if (p.palette()[i] == null) continue;
+                    Block b = p.palette()[i].getBlock();
+                    isEsp[i] = esp.containsKey(b);
+                    wt[i] = baseW.getOrDefault(b, 0);
+                }
+                for (int pi : p.idx()) {
+                    if (pi < 0 || pi >= n) continue;
+                    if (isEsp[pi]) espCount++;
+                    score += wt[pi];
+                }
+            }
+            int chestW = Math.max(1, baseW.getOrDefault(Blocks.CHEST, 2));
+            int needChests = Math.max(0, (int) (Config.minBase * 1.5) - score + chestW - 1) / chestW;
+            int needEsp = (!esp.isEmpty() && espCount < 3) ? 3 + RNG.nextInt(3) : 0;
+            int total = Math.min(40, Math.max(needChests, needEsp));
+            if (total == 0) return sc;
+
+            List<Block> pool = new ArrayList<>(esp.keySet());
+            if (pool.isEmpty()) pool.add(Blocks.CHEST);
+            List<List<BlockState>> pals = new ArrayList<>();
+            for (Part p : sc.parts()) pals.add(new ArrayList<>(Arrays.asList(p.palette())));
+
+            for (int k = 0; k < total; k++) {
+                Block put = k < needChests ? Blocks.CHEST : pool.get(RNG.nextInt(pool.size()));
+                for (int tries = 0; tries < 300; tries++) {
+                    int pi = RNG.nextInt(sc.parts().size());
+                    Part p = sc.parts().get(pi);
+                    int x = RNG.nextInt(p.sx()), y = 1 + RNG.nextInt(Math.max(1, p.sy() - 1)), z = RNG.nextInt(p.sz());
+                    if (y >= p.sy()) continue;
+                    int here = (y * p.sz() + z) * p.sx() + x, below = ((y - 1) * p.sz() + z) * p.sx() + x;
+                    if (!isAirIdx(p, pals.get(pi), here) || isAirIdx(p, pals.get(pi), below)) continue;
+                    List<BlockState> pal = pals.get(pi);
+                    BlockState st = put.defaultBlockState();
+                    int at = pal.indexOf(st);
+                    if (at < 0) { pal.add(st); at = pal.size() - 1; }
+                    p.idx()[here] = at;
+                    break;
+                }
+            }
+            List<Part> out = new ArrayList<>();
+            for (int i = 0; i < sc.parts().size(); i++) {
+                Part p = sc.parts().get(i);
+                out.add(new Part(p.ox(), p.oy(), p.oz(), p.sx(), p.sy(), p.sz(), pals.get(i).toArray(new BlockState[0]), p.idx()));
+            }
+            return new Schem(out, sc.w(), sc.h(), sc.l());
+        } catch (Exception e) {
+            return sc;
+        }
+    }
+
+    private static boolean isAirIdx(Part p, List<BlockState> pal, int cell) {
+        if (cell < 0 || cell >= p.idx().length) return false;
+        int pi = p.idx()[cell];
+        return pi < 0 || pi >= pal.size() || pal.get(pi) == null || pal.get(pi).isAir();
     }
 
     private static void tick(MinecraftServer server) {

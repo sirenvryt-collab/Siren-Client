@@ -19,6 +19,8 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.Container;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.player.Player;
@@ -80,6 +82,11 @@ public final class TestBases {
     /** Menu toggle: draw the beacon lines over the dig spots. */
     public static boolean showDigBeacons = true;
     private static Object armedLevel = null;
+
+    /** Menu toggle: constant night vision while larp mode is on (re-applied right after a totem pop). */
+    public static boolean nightVision = true;
+    private static boolean nvApplied = false;
+    private static int nvCool = 0;
 
     // bonus base after a dig-down relog: sometimes (not every time) one appears a few seconds of flight away
     private static final double NEAR_CHANCE = 0.5;     // after one miss the next qualifying relog is guaranteed
@@ -188,6 +195,8 @@ public final class TestBases {
             if (larp && !hidden.isEmpty() && FakeHud.rubberband && posHistory.size() >= 10) rubberband(server, mc);
         }
 
+        nightVisionTick(mc, server);
+
         if (!larp || mc.level.dimension() != Level.OVERWORLD) return;
         if (mc.player.isCreative() || mc.player.isSpectator()) return;   // survival only
         if (!mc.player.isFallFlying()) return;                           // only counts while gliding
@@ -195,6 +204,29 @@ public final class TestBases {
         flightTicks = 0;
         nextAt = rollInterval();
         spawnAhead(mc, server);
+    }
+
+    /** Infinite, hidden night vision. A totem pop wipes all effects, so it is simply given back a moment later. */
+    private static void nightVisionTick(Minecraft mc, MinecraftServer server) {
+        UUID id = mc.player.getUUID();
+        if (larp && nightVision) {
+            if (nvCool > 0) { nvCool--; return; }
+            if (!mc.player.hasEffect(MobEffects.NIGHT_VISION)) {
+                nvApplied = true;
+                nvCool = 5;
+                server.execute(() -> {
+                    ServerPlayer sp = server.getPlayerList().getPlayer(id);
+                    if (sp != null) sp.addEffect(new MobEffectInstance(MobEffects.NIGHT_VISION,
+                            MobEffectInstance.INFINITE_DURATION, 0, true, false, false));
+                });
+            }
+        } else if (nvApplied) {
+            nvApplied = false;
+            server.execute(() -> {
+                ServerPlayer sp = server.getPlayerList().getPlayer(id);
+                if (sp != null) sp.removeEffect(MobEffects.NIGHT_VISION);
+            });
+        }
     }
 
     /** Relog (or dimension change) after mining down: hidden bases become visible to the ESP. */

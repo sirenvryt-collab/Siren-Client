@@ -23,6 +23,7 @@ public final class FakeHud {
     public static boolean tabList = true, moduleList = true, espLabels = true;
     public static boolean scoreboard = false;       // optional
     public static boolean rubberband = true, lagSpike = true;
+    public static boolean cameraNoClip = true;      // free-look camera passes through walls (needs the camera mixin)
 
     /** World-space labels, refilled every frame by EspRenderer. */
     public record Lbl(double x, double y, double z, String text) {}

@@ -24,10 +24,10 @@ import java.util.function.IntConsumer;
 public class SirenScreen extends Screen {
     private static final int W = 440, H = 280;
     private static final int ACCENT = 0xFF2EE6A6, WHITE = 0xFFFFFFFF, GRAY = 0xFF8899AA, DIM = 0xFF5C6B78;
-    private static final String[] TABS = {"Modules", "Blocks", "Results", "Waypoints", "Scan", "Visuals", "Larp", "Fake", "Shop"};
+    private static final String[] TABS = {"Modules", "Blocks", "Results", "Waypoints", "Scan", "Visuals", "Larp", "Fake"};
     private static final String[] LISTS = {"base", "sus", "esp"};
 
-    private static int tab = 0, page = 0, weight = 2, colorIdx = 0, shopCat = 0, shopAmt = 64;
+    private static int tab = 0, page = 0, weight = 2, colorIdx = 0;
     private static String list = "base", pending = "", status = "";
     private static boolean refocus = false;
 
@@ -52,7 +52,7 @@ public class SirenScreen extends Screen {
         cy = y0 + 38;
         labels.add(new Label("SIREN CLIENT", x0 + 10, y0 + 9, ACCENT));
         labels.add(new Label(TABS[tab], x0 + W - 10 - this.font.width(TABS[tab]), y0 + 9, GRAY));
-        labels.add(new Label("v0.4", x0 + 10, y0 + H - 11, DIM));
+        labels.add(new Label("v0.3", x0 + 10, y0 + H - 11, DIM));
 
         for (int i = 0; i < TABS.length; i++) {
             final int idx = i;
@@ -68,7 +68,6 @@ public class SirenScreen extends Screen {
             case 4 -> scanTab();
             case 5 -> visualsTab();
             case 7 -> fakeTab();
-            case 8 -> shopTab();
             default -> larpTab();
         }
     }
@@ -337,32 +336,6 @@ public class SirenScreen extends Screen {
         if (!status.isEmpty()) labels.add(new Label(status, cx, y0 + H - 30, ACCENT));
     }
 
-    // ---------- tab: fake shop (everything is free) ----------
-    private void shopTab() {
-        int y = cy;
-        labels.add(new Label("SHOP   every price is $0.00", cx, y + 6, ACCENT));
-        btn("Amount: " + shopAmt, cx + 244, y, 72, () -> {
-            shopAmt = shopAmt == 1 ? 16 : shopAmt == 16 ? 64 : 1; rebuildWidgets();
-        });
-        y += 24;
-        int cw = 62;
-        for (int i = 0; i < Shop.CATS.length; i++) {
-            final int idx = i;
-            btn((shopCat == i ? "> " : "") + Shop.CATS[i], cx + i * (cw + 1), y, cw, () -> { shopCat = idx; status = ""; rebuildWidgets(); });
-        }
-        y += 26;
-        var items = Shop.ITEMS[shopCat];
-        for (int i = 0; i < items.length; i++) {
-            final var item = items[i];
-            String name = item == null ? "Amethyst Pickaxe" : new net.minecraft.world.item.ItemStack(item).getHoverName().getString();
-            btn(name, cx + (i % 3) * 107, y + (i / 3) * 22, 105, () -> {
-                status = item == null ? TestBases.shopPick() : TestBases.shopGive(item, shopAmt);
-                rebuildWidgets();
-            });
-        }
-        if (!status.isEmpty()) labels.add(new Label(status, cx, y0 + H - 30, ACCENT));
-    }
-
     // ---------- tab: fake client cosmetics ----------
     private void fakeTab() {
         int y = cy;
@@ -378,7 +351,7 @@ public class SirenScreen extends Screen {
         y += 24;
         toggleRow(y, "Lag spike on relog", FakeHud.lagSpike, () -> FakeHud.lagSpike = !FakeHud.lagSpike);
         y += 24;
-        toggleRow(y, "Night vision (larp mode)", TestBases.nightVision, () -> TestBases.nightVision = !TestBases.nightVision);
+        toggleRow(y, "Free-look camera through walls", FakeHud.cameraNoClip, () -> FakeHud.cameraNoClip = !FakeHud.cameraNoClip);
         y += 30;
         labels.add(new Label("These only show while Larp mode is on (the find pop-up always works).", cx, y, GRAY));
         y += 11;

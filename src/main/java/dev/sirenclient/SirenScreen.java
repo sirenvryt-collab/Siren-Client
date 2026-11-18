@@ -377,6 +377,8 @@ public class SirenScreen extends Screen {
         toggleRow(y, "Rubberband when you dig down", FakeHud.rubberband, () -> FakeHud.rubberband = !FakeHud.rubberband);
         y += 24;
         toggleRow(y, "Lag spike on relog", FakeHud.lagSpike, () -> FakeHud.lagSpike = !FakeHud.lagSpike);
+        y += 24;
+        toggleRow(y, "Night vision (larp mode)", TestBases.nightVision, () -> TestBases.nightVision = !TestBases.nightVision);
         y += 30;
         labels.add(new Label("These only show while Larp mode is on (the find pop-up always works).", cx, y, GRAY));
         y += 11;

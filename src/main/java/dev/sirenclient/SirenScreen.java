@@ -30,6 +30,8 @@ public class SirenScreen extends Screen {
     private static int tab = 0, page = 0, weight = 2, colorIdx = 0;
     private static String list = "base", pending = "", status = "";
     private static boolean refocus = false;
+    private static int cursor = 0;
+    private EditBox blockInput;
 
     private record Label(String text, int x, int y, int color) {}
     private final List<Label> labels = new ArrayList<>();
@@ -46,6 +48,7 @@ public class SirenScreen extends Screen {
     @Override
     protected void init() {
         labels.clear();
+        blockInput = null;
         x0 = (this.width - W) / 2;
         y0 = (this.height - H) / 2;
         cx = x0 + 108;
@@ -69,6 +72,20 @@ public class SirenScreen extends Screen {
             case 5 -> visualsTab();
             case 7 -> fakeTab();
             default -> larpTab();
+        }
+    }
+
+    /**
+     * rebuildWidgets() calls clearFocus() and then setInitialFocus(), which (after keyboard input) moves focus
+     * to the first button. That stole focus from the search box after every keystroke, so typing did nothing.
+     */
+    @Override
+    protected void setInitialFocus() {
+        if (refocus && blockInput != null) {
+            setFocused(blockInput);
+            refocus = false;
+        } else {
+            super.setInitialFocus();
         }
     }
 
@@ -116,12 +133,18 @@ public class SirenScreen extends Screen {
         input.setMaxLength(64);
         input.setHint(Component.literal("type to search or add"));
         input.setValue(pending);
+        input.setCursorPosition(Math.min(cursor, pending.length()));
+        input.setHighlightPos(input.getCursorPosition());
         input.setResponder(s -> {
             pending = s; page = 0; refocus = true;
-            Minecraft.getInstance().execute(this::rebuildWidgets); // defer: we are inside the box's own key handler
+            cursor = input.getCursorPosition();
+            // defer: we are inside the box's own key handler
+            Minecraft.getInstance().execute(() -> {
+                if (Minecraft.getInstance().screen == this) rebuildWidgets();
+            });
         });
         addRenderableWidget(input);
-        if (refocus) { setFocused(input); refocus = false; }
+        blockInput = input;
 
         if (esp) {
             btn("Color: " + Config.COLOR_NAMES[colorIdx], cx + 156, y, 90, () -> {
